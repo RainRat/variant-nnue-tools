@@ -18,6 +18,8 @@
 
 #include <string>
 #include <sstream>
+#include <cctype>
+#include <charconv>
 
 #include "apiutil.h"
 #include "parser.h"
@@ -27,6 +29,11 @@
 namespace Stockfish {
 
 namespace {
+
+    bool only_trailing_space(std::stringstream& ss) {
+        ss >> std::ws;
+        return ss.eof();
+    }
 
     constexpr int MAX_PIECE_POINTS = 20;
 
@@ -64,6 +71,60 @@ namespace {
         left = trim(entry.substr(0, sep));
         right = trim(entry.substr(sep + 1));
         return !left.empty() && !right.empty();
+    }
+
+    PieceType parse_piece_type_token(const Variant* v, const std::string& token) {
+        if (!v || token.empty())
+            return NO_PIECE_TYPE;
+        return v->piece_type_from_symbol(token);
+    }
+
+    bool parse_piece_int_map(const std::string& value, const Variant* v, int target[PIECE_TYPE_NB], bool allowZero = true) {
+        std::string entry;
+        std::stringstream ss(value);
+        while (ss >> entry)
+        {
+            std::string token;
+            std::string rawValue;
+            if (!split_piece_entry(entry, token, rawValue))
+                return false;
+            PieceType pt = parse_piece_type_token(v, token);
+            if (pt == NO_PIECE_TYPE || rawValue.empty())
+                return false;
+
+            int parsedValue = 0;
+            const char* first = rawValue.data();
+            const char* last = first + rawValue.size();
+            auto [ptr, ec] = std::from_chars(first, last, parsedValue);
+            while (ptr != last && std::isspace(static_cast<unsigned char>(*ptr)))
+                ++ptr;
+            if (ec != std::errc() || ptr != last)
+                return false;
+            if (!allowZero && parsedValue < 1)
+                return false;
+            target[pt] = parsedValue;
+        }
+        return only_trailing_space(ss);
+    }
+
+    bool parse_piece_type_map(const std::string& value, const Variant* v, PieceType target[PIECE_TYPE_NB], bool allowNone = false) {
+        std::string entry;
+        std::stringstream ss(value);
+        while (ss >> entry)
+        {
+            std::string fromToken;
+            std::string rawTo;
+            if (!split_piece_entry(entry, fromToken, rawTo))
+                return false;
+            PieceType from = parse_piece_type_token(v, fromToken);
+            if (from == NO_PIECE_TYPE || rawTo.empty())
+                return false;
+            PieceType to = rawTo == "-" && allowNone ? NO_PIECE_TYPE : parse_piece_type_token(v, rawTo);
+            if (to == NO_PIECE_TYPE && !(allowNone && rawTo == "-"))
+                return false;
+            target[from] = to;
+        }
+        return only_trailing_space(ss);
     }
 
     template <typename T> bool set(const std::string& value, T& target)
@@ -425,42 +486,44 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     const auto& pv = config.find("piecePoints");
     if (pv != config.end())
     {
-        char token = '\0', sep = 0;
-        size_t idx = std::string::npos;
-        int parsedPoints = 0;
-        bool parseError = false;
-        bool sawToken = false;
+        bool ok = true;
+        std::string entry;
         std::stringstream ss(pv->second);
-        while (ss >> token)
+        while (ss >> entry)
         {
-            sawToken = true;
-            idx = v->pieceToChar.find(std::toupper(static_cast<unsigned char>(token)));
-            if (idx == std::string::npos)
-                break;
-            if (!(ss >> sep) || sep != ':' || !(ss >> parsedPoints))
+            std::string token;
+            std::string valueToken;
+            if (!split_piece_entry(entry, token, valueToken))
             {
-                parseError = true;
+                ok = false;
+                break;
+            }
+            PieceType pt = v->piece_type_from_symbol(token);
+            int parsedPoints = 0;
+            std::stringstream ps(valueToken);
+            ps >> parsedPoints;
+            if (pt == NO_PIECE_TYPE || ps.fail())
+            {
+                ok = false;
                 break;
             }
             if (parsedPoints < 0)
             {
                 if (DoCheck)
-                    std::cerr << "piecePoints - Negative values are not allowed for type: " << v->pieceToChar[idx] << std::endl;
+                    std::cerr << "piecePoints - Negative values are not allowed for type: " << token << std::endl;
                 parsedPoints = 0;
             }
             if (parsedPoints > MAX_PIECE_POINTS)
             {
                 if (DoCheck)
                     std::cerr << "piecePoints - Value exceeds max " << MAX_PIECE_POINTS
-                              << " for type: " << v->pieceToChar[idx] << ". Clamping." << std::endl;
+                              << " for type: " << token << ". Clamping." << std::endl;
                 parsedPoints = MAX_PIECE_POINTS;
             }
-            v->piecePoints[idx] = parsedPoints;
+            v->piecePoints[pt] = parsedPoints;
         }
-        if (DoCheck && sawToken && idx == std::string::npos)
-            std::cerr << "piecePoints - Invalid piece type: " << token << std::endl;
-        else if (DoCheck && sawToken && idx != std::string::npos && (parseError || !(ss >> std::ws).eof()))
-            std::cerr << "piecePoints - Invalid piece points for type: " << v->pieceToChar[idx] << std::endl;
+        if (DoCheck && !ok)
+            std::cerr << "piecePoints - Invalid piece values: " << pv->second << std::endl;
     }
 
     // Parse deprecate values for backwards compatibility
@@ -527,28 +590,17 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     const auto& it_prom_limit = config.find("promotionLimit");
     if (it_prom_limit != config.end())
     {
-        char token;
-        size_t idx = 0;
-        std::stringstream ss(it_prom_limit->second);
-        while (!ss.eof() && ss >> token && (idx = v->pieceToChar.find(toupper(token))) != std::string::npos
-                         && ss >> token && ss >> v->promotionLimit[idx]) {}
-        if (DoCheck && idx == std::string::npos)
-            std::cerr << "promotionLimit - Invalid piece type: " << token << std::endl;
-        else if (DoCheck && !ss.eof())
-            std::cerr << "promotionLimit - Invalid piece count for type: " << v->pieceToChar[idx] << std::endl;
+        bool ok = parse_piece_int_map(it_prom_limit->second, v, v->promotionLimit, true);
+        if (DoCheck && !ok)
+            std::cerr << "promotionLimit - Invalid piece values: " << it_prom_limit->second << std::endl;
     }
     // promoted piece types
     const auto& it_prom_pt = config.find("promotedPieceType");
     if (it_prom_pt != config.end())
     {
-        char token;
-        size_t idx = 0, idx2 = 0;
-        std::stringstream ss(it_prom_pt->second);
-        while (   ss >> token && (idx = v->pieceToChar.find(toupper(token))) != std::string::npos && ss >> token
-               && ss >> token && (idx2 = (token == '-' ? 0 : v->pieceToChar.find(toupper(token)))) != std::string::npos)
-            v->promotedPieceType[idx] = PieceType(idx2);
-        if (DoCheck && (idx == std::string::npos || idx2 == std::string::npos))
-            std::cerr << "promotedPieceType - Invalid piece type: " << token << std::endl;
+        bool ok = parse_piece_type_map(it_prom_pt->second, v, v->promotedPieceType, true);
+        if (DoCheck && !ok)
+            std::cerr << "promotedPieceType - Invalid piece type mapping: " << it_prom_pt->second << std::endl;
     }
     parse_attribute("piecePromotionOnCapture", v->piecePromotionOnCapture);
     parse_attribute("mandatoryPawnPromotion", v->mandatoryPawnPromotion);
