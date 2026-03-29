@@ -392,7 +392,14 @@ void search_mcts_cmd(Position& pos, istringstream& is)
             variantpy = &out2;
     }
 
-    const Variant* v = variants.find(variant)->second;
+    auto it = variants.find(variant);
+    if (it == variants.end())
+    {
+        std::cerr << "Unknown variant: " << variant << std::endl;
+        return;
+    }
+
+    const Variant* v = it->second;
     const bool nnueHasWalls = v->nnueWallIndexBase >= 0;
     const bool nnueHasPointScores = v->nnuePointsScorePlanes > 0;
     const bool nnueHasChecks = v->nnuePointsCheckPlanes > 0;
