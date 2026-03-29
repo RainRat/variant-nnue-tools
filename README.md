@@ -4,6 +4,11 @@ This is a variant NNUE training data generator based on [Fairy-Stockfish](https:
 
 You can download binaries from the [releases](https://github.com/ianfab/variant-nnue-tools/releases) or the [development versions](https://github.com/ianfab/variant-nnue-tools/actions/workflows/release.yml).
 
+For the shortest current training path, see [docs/training_quickstart.md](docs/training_quickstart.md). It covers:
+- generating `variant.h` / `variant.py` with `trainer_config`
+- generating a small train / validation set
+- current trainer setup notes, including the `setuptools<81` workaround needed by `pytorch-lightning==1.9.5` on very new Python environments
+
 # Fairy-Stockfish
 
 ## Overview

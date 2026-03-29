@@ -1,6 +1,20 @@
 # `pgn_to_plain`
 This script converts pgn files into text file to apply `learn convert_bin` command. You need to import [python-chess](https://pypi.org/project/python-chess/) to use this script.
 
+# `prepare_trainer.sh`
+
+Use this helper when you want to move from a variant definition to trainer-ready `variant.h` / `variant.py` files without doing the `trainer_config` plumbing by hand.
+
+Example:
+
+```bash
+script/prepare_trainer.sh src/stockfish ko-oshi /tmp/kooshi-cfg \
+  --variant-path /path/to/variants.ini \
+  --trainer-dir /path/to/variant-nnue-pytorch
+```
+
+It does not launch training. It only generates and optionally copies the trainer config.
+
 
     pip install python-chess
 	
@@ -48,5 +62,4 @@ You also need to prepare validation data for training like following.
     ./stockfish
 	setoption name Threads value 8
     learn shuffled_sfen.bin newbob_decay 0.5  validation_set_file_name ccrl-40-15-3400_plain.bin  nn_batch_size 50000 batchsize 1000000 eval_save_interval 8000000 eta 0.05 lambda 0.0 eval_limit 3000 mirror_percentage 0 use_draw_in_training 1
-
 
