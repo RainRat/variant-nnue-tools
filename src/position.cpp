@@ -43,6 +43,7 @@ namespace Stockfish {
 
 namespace Zobrist {
 
+  constexpr int MAX_ZOBRIST_POINTS = 512;
   Key psq[PIECE_NB][SQUARE_NB];
   Key enpassant[FILE_NB];
   Key castling[CASTLING_RIGHT_NB];
@@ -51,6 +52,7 @@ namespace Zobrist {
   Key checks[COLOR_NB][CHECKS_NB];
   Key wall[SQUARE_NB];
   Key endgame[EG_EVAL_NB];
+  Key points[COLOR_NB][MAX_ZOBRIST_POINTS];
 }
 
 
@@ -157,6 +159,17 @@ Key cuckoo[8192];
 Move cuckooMove[8192];
 #endif
 
+inline void xor_points_bucket(Key& k, Color c, int points) {
+  if (points < 0)
+      return;
+  int idx = std::min(points, Stockfish::Zobrist::MAX_ZOBRIST_POINTS - 1);
+  k ^= Zobrist::points[c][idx];
+}
+
+inline int non_negative_points(int points) {
+  return std::max(points, 0);
+}
+
 
 /// Position::init() initializes at startup the various arrays used to compute hash keys
 
@@ -192,6 +205,10 @@ void Position::init() {
 
   for (int i = NO_EG_EVAL; i < EG_EVAL_NB; ++i)
       Zobrist::endgame[i] = rng.rand<Key>();
+
+  for (Color c : {WHITE, BLACK})
+      for (int i = 0; i < Stockfish::Zobrist::MAX_ZOBRIST_POINTS; ++i)
+          Zobrist::points[c][i] = rng.rand<Key>();
 
   // Prepare the cuckoo tables
   std::memset(cuckoo, 0, sizeof(cuckoo));
@@ -545,6 +562,24 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
       }
   }
 
+  st->pointsCount[WHITE] = 0;
+  st->pointsCount[BLACK] = 0;
+  if (var->pointsCounting)
+  {
+      ss >> std::ws;
+      if (ss.peek() == '{')
+      {
+          char openBrace = 0, closeBrace = 0;
+          int whitePoints = 0, blackPoints = 0;
+          if (ss >> openBrace >> whitePoints >> blackPoints >> closeBrace
+              && openBrace == '{' && closeBrace == '}')
+          {
+              st->pointsCount[WHITE] = non_negative_points(whitePoints);
+              st->pointsCount[BLACK] = non_negative_points(blackPoints);
+          }
+      }
+  }
+
   chess960 = isChess960 || v->chess960;
   tsumeMode = Options["TsumeMode"];
   thisThread = th;
@@ -673,6 +708,10 @@ void Position::set_state(StateInfo* si) const {
   if (check_counting())
       for (Color c : {WHITE, BLACK})
           si->key ^= Zobrist::checks[c][si->checksRemaining[c]];
+
+  if (var->pointsCounting)
+      for (Color c : {WHITE, BLACK})
+          xor_points_bucket(si->key, c, si->pointsCount[c]);
 }
 
 
@@ -839,6 +878,9 @@ string Position::fen(bool sfen, bool showPromoted, int countStarted, std::string
       ss << st->rule50;
 
   ss << " " << 1 + (gamePly - (sideToMove == BLACK)) / 2;
+
+  if (variant()->pointsCounting)
+      ss << " {" << st->pointsCount[WHITE] << " " << st->pointsCount[BLACK] << "}";
 
   return ss.str();
 }
@@ -1667,6 +1709,29 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
       else if (Eval::NNUE::useNNUE != Eval::NNUE::UseNNUEMode::False)
           dp.handPiece[1] = NO_PIECE;
 
+      if (points_counting())
+      {
+          PointsRule pointsOwner = points_rule_captures();
+          int points = var->piecePoints[type_of(captured)];
+
+          switch (pointsOwner) {
+              case POINTS_US:
+                  st->pointsCount[us] += points;
+                  break;
+              case POINTS_THEM:
+                  st->pointsCount[them] += points;
+                  break;
+              case POINTS_OWNER:
+                  st->pointsCount[color_of(captured)] += points;
+                  break;
+              case POINTS_NON_OWNER:
+                  st->pointsCount[~color_of(captured)] += points;
+                  break;
+              case POINTS_NONE:
+                  break;
+          }
+      }
+
       // Update material hash key and prefetch access to materialTable
       k ^= Zobrist::psq[captured][capsq];
       st->materialKey ^= Zobrist::psq[captured][pieceCount[captured]];
@@ -1766,6 +1831,12 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
   // Move the piece. The tricky Chess960 castling is handled earlier
   if (type_of(m) == DROP)
   {
+      if (var->payPointsToDrop)
+      {
+          st->pointsCount[us] -= var->piecePoints[type_of(pc)];
+          st->pointsCount[us] = non_negative_points(st->pointsCount[us]);
+      }
+
       if (Eval::NNUE::useNNUE != Eval::NNUE::UseNNUEMode::False)
       {
           // Add drop piece
@@ -2050,6 +2121,17 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
               }
           }
 
+          if (points_counting()) {
+              int pts = var->piecePoints[type_of(bpc)];
+              switch (points_rule_captures()) {
+                  case POINTS_US:        st->pointsCount[us]  += pts; break;
+                  case POINTS_THEM:      st->pointsCount[~us] += pts; break;
+                  case POINTS_OWNER:     st->pointsCount[bc]  += pts; break;
+                  case POINTS_NON_OWNER: st->pointsCount[~bc] += pts; break;
+                  default: break;
+              }
+          }
+
           // Update material hash key
           k ^= Zobrist::psq[bpc][bsq];
           st->materialKey ^= Zobrist::psq[bpc][pieceCount[bpc]];
@@ -2090,6 +2172,15 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
       st->wallSquares |= gating_square(m);
       byTypeBB[ALL_PIECES] |= gating_square(m);
       k ^= Zobrist::wall[gating_square(m)];
+  }
+
+  if (var->pointsCounting) {
+      for (Color c : {WHITE, BLACK}) {
+          if (st->pointsCount[c] == st->previous->pointsCount[c])
+              continue;
+          xor_points_bucket(k, c, st->previous->pointsCount[c]);
+          xor_points_bucket(k, c, st->pointsCount[c]);
+      }
   }
 
   // Update the key with the final value
@@ -2372,6 +2463,7 @@ Key Position::key_after(Move m) const {
   Piece pc = moved_piece(m);
   Piece captured = piece_on(to);
   Key k = st->key ^ Zobrist::side;
+  int nextPoints[COLOR_NB] = {st->pointsCount[WHITE], st->pointsCount[BLACK]};
 
   if (captured)
   {
@@ -2382,15 +2474,37 @@ Key Position::key_after(Move m) const {
           k ^= Zobrist::inHand[removeFromHand][pieceCountInHand[color_of(removeFromHand)][type_of(removeFromHand)] + 1]
               ^ Zobrist::inHand[removeFromHand][pieceCountInHand[color_of(removeFromHand)][type_of(removeFromHand)]];
       }
+      if (points_counting())
+      {
+          int pts = variant()->piecePoints[type_of(captured)];
+          switch (points_rule_captures())
+          {
+              case POINTS_US:        nextPoints[sideToMove] += pts; break;
+              case POINTS_THEM:      nextPoints[~sideToMove] += pts; break;
+              case POINTS_OWNER:     nextPoints[color_of(captured)] += pts; break;
+              case POINTS_NON_OWNER: nextPoints[~color_of(captured)] += pts; break;
+              case POINTS_NONE:      break;
+          }
+      }
   }
   if (type_of(m) == DROP)
   {
       Piece pc_hand = make_piece(sideToMove, in_hand_piece_type(m));
-      return k ^ Zobrist::psq[pc][to] ^ Zobrist::inHand[pc_hand][pieceCountInHand[color_of(pc_hand)][type_of(pc_hand)]]
-            ^ Zobrist::inHand[pc_hand][pieceCountInHand[color_of(pc_hand)][type_of(pc_hand)] - 1];
+      k ^= Zobrist::psq[pc][to] ^ Zobrist::inHand[pc_hand][pieceCountInHand[color_of(pc_hand)][type_of(pc_hand)]]
+         ^ Zobrist::inHand[pc_hand][pieceCountInHand[color_of(pc_hand)][type_of(pc_hand)] - 1];
+      if (var->payPointsToDrop)
+          nextPoints[sideToMove] = non_negative_points(nextPoints[sideToMove] - variant()->piecePoints[type_of(pc)]);
+      for (Color c : {WHITE, BLACK})
+          if (nextPoints[c] != st->pointsCount[c])
+              xor_points_bucket(k, c, st->pointsCount[c]), xor_points_bucket(k, c, nextPoints[c]);
+      return k;
   }
 
-  return k ^ Zobrist::psq[pc][to] ^ Zobrist::psq[pc][from];
+  k ^= Zobrist::psq[pc][to] ^ Zobrist::psq[pc][from];
+  for (Color c : {WHITE, BLACK})
+      if (nextPoints[c] != st->pointsCount[c])
+          xor_points_bucket(k, c, st->pointsCount[c]), xor_points_bucket(k, c, nextPoints[c]);
+  return k;
 }
 
 
@@ -2845,6 +2959,41 @@ bool Position::is_immediate_game_end(Value& result, int ply) const {
   {
       result = mated_in(ply);
       return true;
+  }
+
+  if (points_counting() && points_goal() > 0)
+  {
+      if (st->pointsCount[~sideToMove] >= points_goal() && st->pointsCount[sideToMove] >= points_goal())
+      {
+          if (st->pointsCount[~sideToMove] != st->pointsCount[sideToMove])
+          {
+              if (var->pointsGoalSimulValueByMostPoints != VALUE_DRAW)
+              {
+                  result = convert_mate_value(
+                    st->pointsCount[~sideToMove] > st->pointsCount[sideToMove]
+                      ? -var->pointsGoalSimulValueByMostPoints
+                      :  var->pointsGoalSimulValueByMostPoints, ply);
+                  return true;
+              }
+          }
+          if (var->pointsGoalSimulValueByMover != VALUE_NONE)
+          {
+              result = convert_mate_value(-var->pointsGoalSimulValueByMover, ply);
+              return true;
+          }
+          result = convert_mate_value(VALUE_DRAW, ply);
+          return true;
+      }
+      if (st->pointsCount[~sideToMove] >= points_goal())
+      {
+          result = convert_mate_value(-var->pointsGoalValue, ply);
+          return true;
+      }
+      if (st->pointsCount[sideToMove] >= points_goal())
+      {
+          result = convert_mate_value(var->pointsGoalValue, ply);
+          return true;
+      }
   }
 
   //Calculate eligible pieces for connection once.

@@ -103,6 +103,7 @@ struct Variant {
   bool dropPromoted = false;
   PieceType dropNoDoubled = NO_PIECE_TYPE;
   int dropNoDoubledCount = 1;
+  bool payPointsToDrop = false;
   bool immobilityIllegal = false;
   bool gating = false;
   WallingRule wallingRule = NO_WALLING;
@@ -162,6 +163,13 @@ struct Variant {
   bool adjudicateFullBoard = false;
   CountingRule countingRule = NO_COUNTING;
   CastlingRights castlingWins = NO_CASTLING;
+  bool pointsCounting = false;
+  PointsRule pointsRuleCaptures = POINTS_US;
+  int piecePoints[PIECE_TYPE_NB] = {}; // for games of points, not evaluation
+  Value pointsGoalValue = VALUE_MATE;
+  Value pointsGoalSimulValueByMostPoints = VALUE_MATE;
+  Value pointsGoalSimulValueByMover = VALUE_NONE;
+  int pointsGoal = 0;
 
   // Derived properties
   bool fastAttacks = true;
@@ -171,6 +179,9 @@ struct Variant {
   int pieceIndex[PIECE_TYPE_NB];
   int nnueDimensions = 0;
   int nnueWallIndexBase = -1;
+  int nnuePointsIndexBase = -1;
+  int nnuePointsScorePlanes = 0;
+  int nnuePointsCheckPlanes = 0;
   bool nnueUsePockets = false;
   int pieceSquareIndex[COLOR_NB][PIECE_NB];
   int pieceHandIndex[COLOR_NB][PIECE_NB];

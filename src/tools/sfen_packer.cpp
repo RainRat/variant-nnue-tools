@@ -211,6 +211,14 @@ namespace Stockfish::Tools {
             }
         }
 
+        if (pos.nnue_points_score_planes())
+            for (auto c : Colors)
+                stream.write_n_bit(pos.points_score_clamped(c), POINTS_SCORE_BITS);
+
+        if (pos.nnue_points_check_planes())
+            for (auto c : Colors)
+                stream.write_n_bit(std::min<int>(std::max(0, int(pos.checks_remaining(c))), CHECKS_MAX), CHECKS_BITS);
+
         for(auto c: Colors)
             for (PieceSet ps = pos.piece_types(); ps;)
                 stream.write_n_bit(pos.count_in_hand(c, pop_lsb(ps)), DATA_SIZE > 512 ? 7 : 5);
@@ -371,6 +379,14 @@ namespace Stockfish::Tools {
                 }
             }
         }
+
+        if (pos.nnue_points_score_planes())
+            for (auto c : Colors)
+                pos.st->pointsCount[c] = stream.read_n_bit(POINTS_SCORE_BITS);
+
+        if (pos.nnue_points_check_planes())
+            for (auto c : Colors)
+                pos.st->checksRemaining[c] = CheckCount(stream.read_n_bit(CHECKS_BITS));
 
         // Hand pieces - read the counts for each color and piece type
         for(auto c: Colors)

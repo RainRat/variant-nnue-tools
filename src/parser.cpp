@@ -28,6 +28,8 @@ namespace Stockfish {
 
 namespace {
 
+    constexpr int MAX_PIECE_POINTS = 20;
+
     template <typename T> bool set(const std::string& value, T& target)
     {
         std::stringstream ss(value);
@@ -111,6 +113,15 @@ namespace {
                 : value == "top" ? TOP
                 : NO_ENCLOSING;
         return value == "reversi" || value == "ataxx" || value == "quadwrangle" || value =="snort" || value =="anyside" || value =="top" || value == "none";
+    }
+
+    template <> bool set(const std::string& value, PointsRule& target) {
+        target =  value == "us" ? POINTS_US
+                : value == "them" ? POINTS_THEM
+                : value == "owner" ? POINTS_OWNER
+                : value == "non-owner" ? POINTS_NON_OWNER
+                : POINTS_NONE;
+        return value == "us" || value == "them" || value == "owner" || value == "non-owner" || value == "none";
     }
 
     template <> bool set(const std::string& value, WallingRule& target) {
@@ -207,6 +218,7 @@ template <bool Current, class T> bool VariantParser<DoCheck>::parse_attribute(co
                                   : std::is_same<T, MaterialCounting>() ? "MaterialCounting"
                                   : std::is_same<T, CountingRule>() ? "CountingRule"
                                   : std::is_same<T, ChasingRule>() ? "ChasingRule"
+                                  : std::is_same<T, PointsRule>() ? "PointsRule"
                                   : std::is_same<T, EnclosingRule>() ? "EnclosingRule"
                                   : std::is_same<T, Bitboard>() ? "Bitboard"
                                   : std::is_same<T, CastlingRights>() ? "CastlingRights"
@@ -323,6 +335,48 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
             else if (DoCheck && !ss.eof())
                 std::cerr << optionName << " - Invalid piece value for type: " << v->pieceToChar[idx] << std::endl;
         }
+    }
+
+    // piece points (for games of points, not evaluation)
+    const auto& pv = config.find("piecePoints");
+    if (pv != config.end())
+    {
+        char token = '\0', sep = 0;
+        size_t idx = std::string::npos;
+        int parsedPoints = 0;
+        bool parseError = false;
+        bool sawToken = false;
+        std::stringstream ss(pv->second);
+        while (ss >> token)
+        {
+            sawToken = true;
+            idx = v->pieceToChar.find(std::toupper(static_cast<unsigned char>(token)));
+            if (idx == std::string::npos)
+                break;
+            if (!(ss >> sep) || sep != ':' || !(ss >> parsedPoints))
+            {
+                parseError = true;
+                break;
+            }
+            if (parsedPoints < 0)
+            {
+                if (DoCheck)
+                    std::cerr << "piecePoints - Negative values are not allowed for type: " << v->pieceToChar[idx] << std::endl;
+                parsedPoints = 0;
+            }
+            if (parsedPoints > MAX_PIECE_POINTS)
+            {
+                if (DoCheck)
+                    std::cerr << "piecePoints - Value exceeds max " << MAX_PIECE_POINTS
+                              << " for type: " << v->pieceToChar[idx] << ". Clamping." << std::endl;
+                parsedPoints = MAX_PIECE_POINTS;
+            }
+            v->piecePoints[idx] = parsedPoints;
+        }
+        if (DoCheck && sawToken && idx == std::string::npos)
+            std::cerr << "piecePoints - Invalid piece type: " << token << std::endl;
+        else if (DoCheck && sawToken && idx != std::string::npos && (parseError || !(ss >> std::ws).eof()))
+            std::cerr << "piecePoints - Invalid piece points for type: " << v->pieceToChar[idx] << std::endl;
     }
 
     // Parse deprecate values for backwards compatibility
@@ -470,6 +524,7 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     parse_attribute("dropPromoted", v->dropPromoted);
     parse_attribute("dropNoDoubled", v->dropNoDoubled, v->pieceToChar);
     parse_attribute("dropNoDoubledCount", v->dropNoDoubledCount);
+    parse_attribute("payPointsToDrop", v->payPointsToDrop);
     parse_attribute("immobilityIllegal", v->immobilityIllegal);
     parse_attribute("gating", v->gating);
     parse_attribute("wallingRule", v->wallingRule);
@@ -548,6 +603,16 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     parse_attribute("adjudicateFullBoard", v->adjudicateFullBoard);
     parse_attribute("countingRule", v->countingRule);
     parse_attribute("castlingWins", v->castlingWins);
+    parse_attribute("pointsCounting", v->pointsCounting);
+    parse_attribute("pointsRuleCaptures", v->pointsRuleCaptures);
+    parse_attribute("pointsGoal", v->pointsGoal);
+    parse_attribute("pointsGoalValue", v->pointsGoalValue);
+    parse_attribute("pointsGoalSimulValueByMover", v->pointsGoalSimulValueByMover);
+    parse_attribute("pointsGoalSimulValueByMostPoints", v->pointsGoalSimulValueByMostPoints);
+    if (config.find("pointsGoalSimulValueByMostPoints") == config.end())
+        parse_attribute("pointsGoalSimulValue", v->pointsGoalSimulValueByMostPoints);
+    if (v->payPointsToDrop)
+        v->pointsCounting = true;
     
     // Report invalid options
     if (DoCheck)

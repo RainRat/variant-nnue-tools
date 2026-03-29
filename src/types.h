@@ -300,6 +300,11 @@ enum CheckCount : int {
   CHECKS_0 = 0, CHECKS_NB = 11
 };
 
+constexpr int CHECKS_BITS = 4;
+constexpr int CHECKS_MAX = (1 << CHECKS_BITS) - 1;
+constexpr int POINTS_SCORE_BITS = 8;
+constexpr int POINTS_SCORE_MAX = (1 << POINTS_SCORE_BITS) - 1;
+
 enum MaterialCounting {
   NO_MATERIAL_COUNTING, JANGGI_MATERIAL, UNWEIGHTED_MATERIAL, WHITE_DRAW_ODDS, BLACK_DRAW_ODDS
 };
@@ -318,6 +323,10 @@ enum EnclosingRule {
 
 enum WallingRule {
   NO_WALLING, ARROW, DUCK, EDGE, PAST, STATIC
+};
+
+enum PointsRule {
+  POINTS_NONE, POINTS_US, POINTS_THEM, POINTS_OWNER, POINTS_NON_OWNER
 };
 
 enum EndgameEval {

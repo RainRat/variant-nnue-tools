@@ -391,9 +391,14 @@ void search_mcts_cmd(Position& pos, istringstream& is)
 
     const Variant* v = variants.find(variant)->second;
     const bool nnueHasWalls = v->nnueWallIndexBase >= 0;
-    const std::uint32_t nnueFeatureHash = nnueHasWalls
-        ? Eval::NNUE::Features::HalfKAv2Variants::HashValueWithWalls
-        : Eval::NNUE::Features::HalfKAv2Variants::HashValueNoWalls;
+    const bool nnueHasPoints = v->nnuePointsIndexBase >= 0;
+    const bool nnueHasChecks = v->nnuePointsCheckPlanes > 0;
+    const std::uint32_t nnueFeatureHash =
+        nnueHasWalls
+            ? (nnueHasPoints ? Eval::NNUE::Features::HalfKAv2Variants::HashValueWithWallsAndPoints
+                             : Eval::NNUE::Features::HalfKAv2Variants::HashValueWithWalls)
+            : (nnueHasPoints ? Eval::NNUE::Features::HalfKAv2Variants::HashValueWithPoints
+                             : Eval::NNUE::Features::HalfKAv2Variants::HashValueNoExtras);
     const std::uint32_t nnueNetHash =
         (nnueFeatureHash ^ Eval::NNUE::FeatureTransformer::OutputDimensions)
         ^ Eval::NNUE::Network::get_hash_value();
@@ -401,6 +406,8 @@ void search_mcts_cmd(Position& pos, istringstream& is)
 
     const int dataSize = (v->maxFile + 1) * (v->maxRank + 1)
                         + (nnueHasWalls ? (v->maxFile + 1) * (v->maxRank + 1) : 0)
+                        + (nnueHasPoints ? 2 * POINTS_SCORE_BITS : 0)
+                        + (nnueHasChecks ? 2 * CHECKS_BITS : 0)
                         + v->nnueMaxPieces * 5
                         + popcount(v->pieceTypes) * 2 * 5 + 50 > 512 ? 1024 : 512;
 
@@ -420,6 +427,10 @@ void search_mcts_cmd(Position& pos, istringstream& is)
     << "#define PIECE_COUNT " << v->nnueMaxPieces << std::endl
     << "#define POCKETS " << (v->nnueUsePockets ? "true" : "false") << std::endl
     << "#define HAS_WALLS " << (nnueHasWalls ? "true" : "false") << std::endl
+    << "#define HAS_POINTS " << (nnueHasPoints ? "true" : "false") << std::endl
+    << "#define HAS_CHECKS " << (nnueHasChecks ? "true" : "false") << std::endl
+    << "#define POINTS_SCORE_BITS " << POINTS_SCORE_BITS << std::endl
+    << "#define CHECKS_BITS " << CHECKS_BITS << std::endl
     << "#define KING_SQUARES " << v->nnueKingSquare << std::endl
     << "#define NNUE_INPUT_DIMS " << v->nnueDimensions << std::endl
     << "#define NNUE_FEATURE_HASH 0x" << std::hex << std::uppercase
@@ -446,6 +457,10 @@ void search_mcts_cmd(Position& pos, istringstream& is)
     << "USE_POCKETS = " << (v->nnueUsePockets ? "True" : "False") << std::endl
     << "POCKETS = 2 * FILES if USE_POCKETS else 0" << std::endl
     << "HAS_WALLS = " << (nnueHasWalls ? "True" : "False") << std::endl
+    << "HAS_POINTS = " << (nnueHasPoints ? "True" : "False") << std::endl
+    << "HAS_CHECKS = " << (nnueHasChecks ? "True" : "False") << std::endl
+    << "POINTS_SCORE_BITS = " << POINTS_SCORE_BITS << std::endl
+    << "CHECKS_BITS = " << CHECKS_BITS << std::endl
     << "NNUE_INPUT_DIMS = " << v->nnueDimensions << std::endl
     << "NNUE_FEATURE_HASH = 0x" << std::hex << std::uppercase
     << nnueFeatureHash << std::dec << std::nouppercase << std::endl

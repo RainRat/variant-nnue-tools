@@ -54,6 +54,7 @@ struct StateInfo {
   int    pliesFromNull;
   int    countingPly;
   int    countingLimit;
+  int    pointsCount[COLOR_NB];
   CheckCount checksRemaining[COLOR_NB];
   Bitboard epSquares;
   Square castlingKingSquare[COLOR_NB];
@@ -165,6 +166,9 @@ public:
   int nnue_piece_hand_index(Color perspective, Piece pc) const;
   int nnue_king_square_index(Square ksq) const;
   int nnue_wall_index_base() const;
+  int nnue_points_index_base() const;
+  int nnue_points_score_planes() const;
+  int nnue_points_check_planes() const;
   bool free_drops() const;
   bool fast_attacks() const;
   bool fast_attacks2() const;
@@ -230,6 +234,15 @@ public:
   CheckCount checks_remaining(Color c) const;
   MaterialCounting material_counting() const;
   CountingRule counting_rule() const;
+  bool points_counting() const;
+  PointsRule points_rule_captures() const;
+  int points_goal() const;
+  int points_count(Color c) const;
+  int points_score(Color c) const;
+  int points_score_clamped(Color c) const;
+  Value points_goal_value() const;
+  Value points_goal_simul_value_by_most_points() const;
+  Value points_goal_simul_value_by_mover() const;
 
   // Variant-specific properties
   int count_in_hand(PieceType pt) const;
@@ -643,6 +656,21 @@ inline int Position::nnue_king_square_index(Square ksq) const {
 inline int Position::nnue_wall_index_base() const {
   assert(var != nullptr);
   return var->nnueWallIndexBase;
+}
+
+inline int Position::nnue_points_index_base() const {
+  assert(var != nullptr);
+  return var->nnuePointsIndexBase;
+}
+
+inline int Position::nnue_points_score_planes() const {
+  assert(var != nullptr);
+  return var->nnuePointsScorePlanes;
+}
+
+inline int Position::nnue_points_check_planes() const {
+  assert(var != nullptr);
+  return var->nnuePointsCheckPlanes;
 }
 
 inline bool Position::checking_permitted() const {
@@ -1182,6 +1210,48 @@ inline MaterialCounting Position::material_counting() const {
 inline CountingRule Position::counting_rule() const {
   assert(var != nullptr);
   return var->countingRule;
+}
+
+inline bool Position::points_counting() const {
+  assert(var != nullptr);
+  return var->pointsCounting;
+}
+
+inline PointsRule Position::points_rule_captures() const {
+  assert(var != nullptr);
+  return var->pointsRuleCaptures;
+}
+
+inline int Position::points_goal() const {
+  assert(var != nullptr);
+  return var->pointsGoal;
+}
+
+inline int Position::points_count(Color c) const {
+  return st->pointsCount[c];
+}
+
+inline int Position::points_score(Color c) const {
+  return st->pointsCount[c];
+}
+
+inline int Position::points_score_clamped(Color c) const {
+  return std::max(0, std::min(points_score(c), POINTS_SCORE_MAX));
+}
+
+inline Value Position::points_goal_value() const {
+  assert(var != nullptr);
+  return var->pointsGoalValue;
+}
+
+inline Value Position::points_goal_simul_value_by_most_points() const {
+  assert(var != nullptr);
+  return var->pointsGoalSimulValueByMostPoints;
+}
+
+inline Value Position::points_goal_simul_value_by_mover() const {
+  assert(var != nullptr);
+  return var->pointsGoalSimulValueByMover;
 }
 
 inline bool Position::is_immediate_game_end() const {
