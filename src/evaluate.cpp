@@ -90,8 +90,9 @@ namespace Eval {
 
   void NNUE::init() {
 
-    useNNUE = nnue_mode_from_option(Options["Use NNUE"]);
-    if (useNNUE == UseNNUEMode::False)
+    UseNNUEMode requestedMode = nnue_mode_from_option(Options["Use NNUE"]);
+    useNNUE = requestedMode;
+    if (requestedMode == UseNNUEMode::False)
         return;
 
     string eval_file = string(Options["EvalFile"]);
@@ -107,7 +108,7 @@ namespace Eval {
         string nnueAlias = variants.find(variant)->second->nnueAlias;
         if (basename.rfind(variant, 0) != string::npos || (!nnueAlias.empty() && basename.rfind(nnueAlias, 0) != string::npos))
         {
-            useNNUE = UseNNUEMode::True;
+            useNNUE = requestedMode;
             break;
         }
     }
@@ -179,7 +180,9 @@ namespace Eval {
     if (CurrentProtocol != XBOARD)
     {
         if (useNNUE != UseNNUEMode::False)
-            sync_cout << "info string NNUE evaluation using " << eval_file_loaded << " enabled" << sync_endl;
+            sync_cout << "info string NNUE evaluation using " << eval_file_loaded
+                      << (useNNUE == UseNNUEMode::Pure ? " enabled (pure)" : " enabled (hybrid)")
+                      << sync_endl;
         else
             sync_cout << "info string classical evaluation enabled" << sync_endl;
     }
@@ -1795,7 +1798,7 @@ std::string Eval::trace(Position& pos) {
   v = pos.side_to_move() == WHITE ? v : -v;
   ss << "Final evaluation       " << to_cp(v) << " (white side)";
   if (NNUE::useNNUE != NNUE::UseNNUEMode::False && pos.nnue_applicable())
-     ss << " [with scaled NNUE, hybrid, ...]";
+     ss << (NNUE::useNNUE == NNUE::UseNNUEMode::Pure ? " [pure NNUE]" : " [with scaled NNUE, hybrid, ...]");
   ss << "\n";
 
   return ss.str();

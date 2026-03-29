@@ -507,6 +507,7 @@ namespace Stockfish::Tools
         };
 
         Eval::NNUE::init();
+        Eval::NNUE::verify();
 
         std::string subcommand;
         is >> subcommand;
