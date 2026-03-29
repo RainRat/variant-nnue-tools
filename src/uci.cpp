@@ -16,8 +16,11 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cassert>
+#include <bitset>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -411,18 +414,40 @@ void search_mcts_cmd(Position& pos, istringstream& is)
         ^ Eval::NNUE::Network::get_hash_value();
     std::cerr << "Writing config for variant " + variant << std::endl;
 
-    const int dataSize = (v->maxFile + 1) * (v->maxRank + 1)
-                        + (nnueHasWalls ? (v->maxFile + 1) * (v->maxRank + 1) : 0)
-                        + (nnueHasPoints ? 2 * POINTS_SCORE_BITS : 0)
-                        + (nnueHasChecks ? 2 * CHECKS_BITS : 0)
-                        + (nnueHasPotions ? COLOR_NB * Variant::POTION_TYPE_NB * ((v->maxFile + 1) * (v->maxRank + 1) + POTION_COOLDOWN_BITS) : 0)
-                        + v->nnueMaxPieces * 5
-                        + popcount(v->pieceTypes) * 2 * 5 + 50 > 512 ? 1024 : 512;
+    auto bits_needed = [](int value) {
+        int bits = 0;
+        unsigned int magnitude = value <= 0 ? 0u : static_cast<unsigned int>(value);
+        while ((1u << bits) <= magnitude && bits < 31)
+            ++bits;
+        return bits ? bits : 1;
+    };
+
+    const int squares = (v->maxFile + 1) * (v->maxRank + 1);
+    const int pieceTypes = static_cast<int>(std::bitset<64>(v->pieceTypes).count());
+    const bool useWide = squares > 128 || pieceTypes > 16;
+    const int squareBits = bits_needed(squares - 1);
+    const int kingBits = useWide ? squareBits : 7;
+    const int epBits = useWide ? squareBits : 7;
+    const int pieceBits = bits_needed(2 * pieceTypes);
+    const int pocketBits = useWide ? bits_needed(v->nnueMaxPieces) : (DATA_SIZE > 512 ? 7 : 5);
+    const int boardSquares = squares - (v->nnueKing != NO_PIECE_TYPE ? 2 : 0);
+    const int boardBits = useWide ? boardSquares * pieceBits : boardSquares * 6;
+    const int dataBits = 1 + 2 * kingBits + boardBits
+                       + (nnueHasWalls ? squares : 0)
+                       + (nnueHasPoints ? 2 * POINTS_SCORE_BITS : 0)
+                       + (nnueHasChecks ? 2 * CHECKS_BITS : 0)
+                       + (nnueHasPotions ? COLOR_NB * Variant::POTION_TYPE_NB * (squares + POTION_COOLDOWN_BITS) : 0)
+                       + 2 * pieceTypes * pocketBits + 4 + 1 + epBits + 6 + 8 + 8 + 1;
+
+    int dataSize = 512;
+    while (dataSize < dataBits)
+        dataSize *= 2;
 
     if (dataSize > DATA_SIZE)
         std::cerr << std::endl << "Warning: Recommended training data size " << dataSize
                   << " not compatible with current version. "
-                  << "Please recompile with largedata=yes" << std::endl << std::endl;
+                  << "Please recompile with datasize=" << dataSize
+                  << " (or adjust largedata/verylargeboards)" << std::endl << std::endl;
 
     if (out1.is_open())
         std::cerr << "Writing variant.h to " << path << std::endl;
@@ -442,6 +467,8 @@ void search_mcts_cmd(Position& pos, istringstream& is)
     << "#define CHECKS_BITS " << CHECKS_BITS << std::endl
     << "#define POTION_COOLDOWN_BITS " << POTION_COOLDOWN_BITS << std::endl
     << "#define KING_SQUARES " << v->nnueKingSquare << std::endl
+    << "#define NNUE_KING " << (v->nnueKing != NO_PIECE_TYPE ? 1 : 0) << std::endl
+    << "#define MOVE_SQUARE_BITS " << SQUARE_BITS << std::endl
     << "#define NNUE_INPUT_DIMS " << v->nnueDimensions << std::endl
     << "#define NNUE_FEATURE_HASH 0x" << std::hex << std::uppercase
     << nnueFeatureHash << std::dec << std::nouppercase << std::endl
@@ -462,8 +489,10 @@ void search_mcts_cmd(Position& pos, istringstream& is)
     << "FILES = " << v->maxFile + 1 << std::endl
     << "SQUARES = RANKS * FILES" << std::endl
     << "KING_SQUARES = " << v->nnueKingSquare << std::endl
+    << "NNUE_KING = " << (v->nnueKing != NO_PIECE_TYPE ? "True" : "False") << std::endl
     << "PIECE_TYPES = " << popcount(v->pieceTypes) << std::endl
     << "PIECES = 2 * PIECE_TYPES" << std::endl
+    << "MOVE_SQUARE_BITS = " << SQUARE_BITS << std::endl
     << "USE_POCKETS = " << (v->nnueUsePockets ? "True" : "False") << std::endl
     << "POCKETS = 2 * FILES if USE_POCKETS else 0" << std::endl
     << "HAS_WALLS = " << (nnueHasWalls ? "True" : "False") << std::endl
@@ -726,9 +755,9 @@ string UCI::dropped_piece(const Position& pos, Move m) {
   assert(type_of(m) == DROP);
   if (dropped_piece_type(m) == pos.promoted_piece_type(in_hand_piece_type(m)))
       // Dropping as promoted piece
-      return std::string{'+', pos.piece_to_char()[in_hand_piece_type(m)]};
+      return std::string("+") + pos.piece_symbol(make_piece(WHITE, in_hand_piece_type(m)));
   else
-      return std::string{pos.piece_to_char()[dropped_piece_type(m)]};
+      return pos.piece_symbol(make_piece(WHITE, dropped_piece_type(m)));
 }
 
 
@@ -769,14 +798,14 @@ string UCI::move(const Position& pos, Move m) {
       move += "," + UCI::square(pos, to) + UCI::square(pos, gating_square(m));
 
   if (type_of(m) == PROMOTION)
-      move += pos.piece_to_char()[make_piece(BLACK, promotion_type(m))];
+      move += pos.piece_symbol(make_piece(BLACK, promotion_type(m)));
   else if (type_of(m) == PIECE_PROMOTION)
       move += '+';
   else if (type_of(m) == PIECE_DEMOTION)
       move += '-';
   else if (is_gating(m))
   {
-      move += pos.piece_to_char()[make_piece(BLACK, gating_type(m))];
+      move += pos.piece_symbol(make_piece(BLACK, gating_type(m)));
       if (gating_square(m) != from)
           move += UCI::square(pos, gating_square(m));
   }
@@ -794,14 +823,21 @@ string UCI::move(const Position& pos, Move m) {
 
 Move UCI::to_move(const Position& pos, string& str) {
 
-  if (str.length() == 5)
+  if (!str.empty())
   {
-      if (str[4] == '=')
-          // shogi moves refraining from promotion might use equals sign
-          str.pop_back();
-      else
-          // Junior could send promotion piece in uppercase
-          str[4] = char(tolower(str[4]));
+      str.erase(std::remove(str.begin(), str.end(), '='), str.end());
+
+      if (str.size() >= 5)
+      {
+          size_t last = str.size() - 1;
+          if (Variant::is_piece_id_suffix(str[last]))
+          {
+              if (last >= 1 && std::isalpha(static_cast<unsigned char>(str[last - 1])))
+                  str[last - 1] = char(std::tolower(static_cast<unsigned char>(str[last - 1])));
+          }
+          else if (std::isalpha(static_cast<unsigned char>(str[last])))
+              str[last] = char(std::tolower(static_cast<unsigned char>(str[last])));
+      }
   }
 
   for (const auto& m : MoveList<LEGAL>(pos))

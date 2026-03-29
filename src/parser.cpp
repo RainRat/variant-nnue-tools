@@ -30,6 +30,42 @@ namespace {
 
     constexpr int MAX_PIECE_POINTS = 20;
 
+    std::string trim(const std::string& s) {
+        size_t first = 0;
+        while (first < s.size() && std::isspace(static_cast<unsigned char>(s[first])))
+            ++first;
+        size_t last = s.size();
+        while (last > first && std::isspace(static_cast<unsigned char>(s[last - 1])))
+            --last;
+        return s.substr(first, last - first);
+    }
+
+    bool read_piece_token(const std::string& value, size_t& pos, std::string& token) {
+        token.clear();
+        while (pos < value.size() && std::isspace(static_cast<unsigned char>(value[pos])))
+            ++pos;
+        if (pos >= value.size())
+            return false;
+        char c = value[pos];
+        token.push_back(c);
+        ++pos;
+        if (Variant::is_piece_id_start(c) && pos < value.size() && Variant::is_piece_id_suffix(value[pos]))
+        {
+            token.push_back(value[pos]);
+            ++pos;
+        }
+        return true;
+    }
+
+    bool split_piece_entry(const std::string& entry, std::string& left, std::string& right) {
+        size_t sep = entry.find(':');
+        if (sep == std::string::npos)
+            return false;
+        left = trim(entry.substr(0, sep));
+        right = trim(entry.substr(sep + 1));
+        return !left.empty() && !right.empty();
+    }
+
     template <typename T> bool set(const std::string& value, T& target)
     {
         std::stringstream ss(value);
@@ -232,19 +268,34 @@ template <bool Current, class T> bool VariantParser<DoCheck>::parse_attribute(co
 }
 
 template <bool DoCheck>
-template <bool Current, class T> bool VariantParser<DoCheck>::parse_attribute(const std::string& key, T& target, std::string pieceToChar) {
+template <bool Current, class T> bool VariantParser<DoCheck>::parse_attribute(const std::string& key, T& target, const Variant* v) {
     const auto& it = config.find(key);
     if (it != config.end())
     {
         target = T();
-        char token;
-        size_t idx = std::string::npos;
-        std::stringstream ss(it->second);
-        while (ss >> token && (idx = token == '*' ? size_t(ALL_PIECES) : pieceToChar.find(toupper(token))) != std::string::npos)
-            set(PieceType(idx), target);
-        if (DoCheck && idx == std::string::npos && token != '-')
+        bool ok = true;
+        std::string token;
+        size_t pos = 0;
+        while (read_piece_token(it->second, pos, token))
+        {
+            if (token == "-")
+                return true;
+            if (token == "*")
+            {
+                set(ALL_PIECES, target);
+                continue;
+            }
+            PieceType pt = v->piece_type_from_symbol(token);
+            if (pt == NO_PIECE_TYPE)
+            {
+                ok = false;
+                break;
+            }
+            set(pt, target);
+        }
+        if (DoCheck && !ok)
             std::cerr << key << " - Invalid piece type: " << token << std::endl;
-        return idx != std::string::npos || token == '-';
+        return ok;
     }
     return false;
 }
@@ -273,22 +324,39 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
         const auto& keyValue = config.find(name);
         if (keyValue != config.end() && !keyValue->second.empty())
         {
-            if (isalpha(keyValue->second.at(0)))
-                v->add_piece(pt, keyValue->second.at(0));
+            std::string value = trim(keyValue->second);
+            std::string token = value;
+            std::string betza;
+            size_t sep = value.find(':');
+            if (sep != std::string::npos)
+            {
+                token = trim(value.substr(0, sep));
+                betza = trim(value.substr(sep + 1));
+            }
+
+            if (!token.empty() && token[0] != '-')
+            {
+                if (!Variant::normalize_piece_symbol(token, WHITE).empty())
+                    v->add_piece(pt, token, betza);
+                else
+                {
+                    if (DoCheck)
+                        std::cerr << name << " - Invalid letter: " << token << std::endl;
+                    v->remove_piece(pt);
+                }
+            }
             else
             {
-                if (DoCheck && keyValue->second.at(0) != '-')
-                    std::cerr << name << " - Invalid letter: " << keyValue->second.at(0) << std::endl;
+                if (DoCheck && !token.empty() && token[0] != '-')
+                    std::cerr << name << " - Invalid letter: " << token << std::endl;
                 v->remove_piece(pt);
             }
-            // betza
+
             if (is_custom(pt))
             {
-                if (keyValue->second.size() > 1)
+                if (!betza.empty())
                 {
-                    v->customPiece[pt - CUSTOM_PIECES] = keyValue->second.substr(2);
-                    // Is there an en passant flag in the Betza notation?
-                    if (v->customPiece[pt - CUSTOM_PIECES].find('e') != std::string::npos)
+                    if (betza.find('e') != std::string::npos)
                     {
                         v->enPassantTypes[WHITE] |= piece_set(pt);
                         v->enPassantTypes[BLACK] |= piece_set(pt);
@@ -299,10 +367,9 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
             }
             else if (pt == KING)
             {
-                if (keyValue->second.size() > 1)
+                if (!betza.empty())
                 {
-                    // custom royal piece
-                    v->customPiece[CUSTOM_PIECES_ROYAL - CUSTOM_PIECES] = keyValue->second.substr(2);
+                    v->customPiece[CUSTOM_PIECES_ROYAL - CUSTOM_PIECES] = betza;
                     v->kingType = CUSTOM_PIECES_ROYAL;
                 }
                 else
@@ -318,6 +385,7 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
             parse_attribute("mobilityRegion" + color + capitalizedPiece, v->mobilityRegion[c][pt]);
         }
     }
+    v->rebuild_piece_symbol_maps();
     // piece values
     for (Phase phase : {MG, EG})
     {
@@ -325,15 +393,31 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
         const auto& pv = config.find(optionName);
         if (pv != config.end())
         {
-            char token;
-            size_t idx = 0;
+            bool ok = true;
+            std::string entry;
             std::stringstream ss(pv->second);
-            while (!ss.eof() && ss >> token && (idx = v->pieceToChar.find(toupper(token))) != std::string::npos
-                             && ss >> token && ss >> v->pieceValue[phase][idx]) {}
-            if (DoCheck && idx == std::string::npos)
-                std::cerr << optionName << " - Invalid piece type: " << token << std::endl;
-            else if (DoCheck && !ss.eof())
-                std::cerr << optionName << " - Invalid piece value for type: " << v->pieceToChar[idx] << std::endl;
+            while (ss >> entry)
+            {
+                std::string token;
+                std::string valueToken;
+                if (!split_piece_entry(entry, token, valueToken))
+                {
+                    ok = false;
+                    break;
+                }
+                PieceType pt = v->piece_type_from_symbol(token);
+                int value = 0;
+                std::stringstream vs(valueToken);
+                vs >> value;
+                if (pt == NO_PIECE_TYPE || vs.fail())
+                {
+                    ok = false;
+                    break;
+                }
+                v->pieceValue[phase][pt] = value;
+            }
+            if (DoCheck && !ok)
+                std::cerr << optionName << " - Invalid piece values: " << pv->second << std::endl;
         }
     }
 
@@ -397,8 +481,8 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     }
     parse_attribute<false>("whiteFlag", v->flagRegion[WHITE]);
     parse_attribute<false>("blackFlag", v->flagRegion[BLACK]);
-    parse_attribute<false>("castlingRookPiece", v->castlingRookPieces[WHITE], v->pieceToChar);
-    parse_attribute<false>("castlingRookPiece", v->castlingRookPieces[BLACK], v->pieceToChar);
+    parse_attribute<false>("castlingRookPiece", v->castlingRookPieces[WHITE], v);
+    parse_attribute<false>("castlingRookPiece", v->castlingRookPieces[BLACK], v);
     parse_attribute<false>("whiteDropRegion", v->dropRegion[WHITE]);
     parse_attribute<false>("blackDropRegion", v->dropRegion[BLACK]);
 
@@ -407,14 +491,14 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     if (dropOnTop) v->enclosingDrop=TOP;
 
     // Parse aliases
-    parse_attribute("pawnTypes", v->mainPromotionPawnType[WHITE], v->pieceToChar);
-    parse_attribute("pawnTypes", v->mainPromotionPawnType[BLACK], v->pieceToChar);
-    parse_attribute("pawnTypes", v->promotionPawnTypes[WHITE], v->pieceToChar);
-    parse_attribute("pawnTypes", v->promotionPawnTypes[BLACK], v->pieceToChar);
-    parse_attribute("pawnTypes", v->enPassantTypes[WHITE], v->pieceToChar);
-    parse_attribute("pawnTypes", v->enPassantTypes[BLACK], v->pieceToChar);
-    parse_attribute("pawnTypes", v->nMoveRuleTypes[WHITE], v->pieceToChar);
-    parse_attribute("pawnTypes", v->nMoveRuleTypes[BLACK], v->pieceToChar);
+    parse_attribute("pawnTypes", v->mainPromotionPawnType[WHITE], v);
+    parse_attribute("pawnTypes", v->mainPromotionPawnType[BLACK], v);
+    parse_attribute("pawnTypes", v->promotionPawnTypes[WHITE], v);
+    parse_attribute("pawnTypes", v->promotionPawnTypes[BLACK], v);
+    parse_attribute("pawnTypes", v->enPassantTypes[WHITE], v);
+    parse_attribute("pawnTypes", v->enPassantTypes[BLACK], v);
+    parse_attribute("pawnTypes", v->nMoveRuleTypes[WHITE], v);
+    parse_attribute("pawnTypes", v->nMoveRuleTypes[BLACK], v);
 
     // Parse the official config options
     parse_attribute("variantTemplate", v->variantTemplate);
@@ -426,18 +510,18 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     parse_attribute("promotionRegionWhite", v->promotionRegion[WHITE]);
     parse_attribute("promotionRegionBlack", v->promotionRegion[BLACK]);
     // Take the first promotionPawnTypes as the main promotionPawnType
-    parse_attribute("promotionPawnTypes", v->mainPromotionPawnType[WHITE], v->pieceToChar);
-    parse_attribute("promotionPawnTypes", v->mainPromotionPawnType[BLACK], v->pieceToChar);
-    parse_attribute("promotionPawnTypes", v->promotionPawnTypes[WHITE], v->pieceToChar);
-    parse_attribute("promotionPawnTypes", v->promotionPawnTypes[BLACK], v->pieceToChar);
-    parse_attribute("promotionPawnTypesWhite", v->mainPromotionPawnType[WHITE], v->pieceToChar);
-    parse_attribute("promotionPawnTypesBlack", v->mainPromotionPawnType[BLACK], v->pieceToChar);
-    parse_attribute("promotionPawnTypesWhite", v->promotionPawnTypes[WHITE], v->pieceToChar);
-    parse_attribute("promotionPawnTypesBlack", v->promotionPawnTypes[BLACK], v->pieceToChar);
-    parse_attribute("promotionPieceTypes", v->promotionPieceTypes[WHITE], v->pieceToChar);
-    parse_attribute("promotionPieceTypes", v->promotionPieceTypes[BLACK], v->pieceToChar);
-    parse_attribute("promotionPieceTypesWhite", v->promotionPieceTypes[WHITE], v->pieceToChar);
-    parse_attribute("promotionPieceTypesBlack", v->promotionPieceTypes[BLACK], v->pieceToChar);
+    parse_attribute("promotionPawnTypes", v->mainPromotionPawnType[WHITE], v);
+    parse_attribute("promotionPawnTypes", v->mainPromotionPawnType[BLACK], v);
+    parse_attribute("promotionPawnTypes", v->promotionPawnTypes[WHITE], v);
+    parse_attribute("promotionPawnTypes", v->promotionPawnTypes[BLACK], v);
+    parse_attribute("promotionPawnTypesWhite", v->mainPromotionPawnType[WHITE], v);
+    parse_attribute("promotionPawnTypesBlack", v->mainPromotionPawnType[BLACK], v);
+    parse_attribute("promotionPawnTypesWhite", v->promotionPawnTypes[WHITE], v);
+    parse_attribute("promotionPawnTypesBlack", v->promotionPawnTypes[BLACK], v);
+    parse_attribute("promotionPieceTypes", v->promotionPieceTypes[WHITE], v);
+    parse_attribute("promotionPieceTypes", v->promotionPieceTypes[BLACK], v);
+    parse_attribute("promotionPieceTypesWhite", v->promotionPieceTypes[WHITE], v);
+    parse_attribute("promotionPieceTypesBlack", v->promotionPieceTypes[BLACK], v);
     parse_attribute("sittuyinPromotion", v->sittuyinPromotion);
     // promotion limit
     const auto& it_prom_limit = config.find("promotionLimit");
@@ -471,9 +555,9 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     parse_attribute("mandatoryPiecePromotion", v->mandatoryPiecePromotion);
     parse_attribute("pieceDemotion", v->pieceDemotion);
     parse_attribute("blastOnCapture", v->blastOnCapture);
-    parse_attribute("blastImmuneTypes", v->blastImmuneTypes, v->pieceToChar);
-    parse_attribute("mutuallyImmuneTypes", v->mutuallyImmuneTypes, v->pieceToChar);
-    parse_attribute("petrifyOnCaptureTypes", v->petrifyOnCaptureTypes, v->pieceToChar);
+    parse_attribute("blastImmuneTypes", v->blastImmuneTypes, v);
+    parse_attribute("mutuallyImmuneTypes", v->mutuallyImmuneTypes, v);
+    parse_attribute("petrifyOnCaptureTypes", v->petrifyOnCaptureTypes, v);
     parse_attribute("petrifyBlastPieces", v->petrifyBlastPieces);
     parse_attribute("doubleStep", v->doubleStep);
     parse_attribute("doubleStepRegionWhite", v->doubleStepRegion[WHITE]);
@@ -484,32 +568,32 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     parse_attribute("enPassantRegion", v->enPassantRegion[BLACK]);
     parse_attribute("enPassantRegionWhite", v->enPassantRegion[WHITE]);
     parse_attribute("enPassantRegionBlack", v->enPassantRegion[BLACK]);
-    parse_attribute("enPassantTypes", v->enPassantTypes[WHITE], v->pieceToChar);
-    parse_attribute("enPassantTypes", v->enPassantTypes[BLACK], v->pieceToChar);
-    parse_attribute("enPassantTypesWhite", v->enPassantTypes[WHITE], v->pieceToChar);
-    parse_attribute("enPassantTypesBlack", v->enPassantTypes[BLACK], v->pieceToChar);
+    parse_attribute("enPassantTypes", v->enPassantTypes[WHITE], v);
+    parse_attribute("enPassantTypes", v->enPassantTypes[BLACK], v);
+    parse_attribute("enPassantTypesWhite", v->enPassantTypes[WHITE], v);
+    parse_attribute("enPassantTypesBlack", v->enPassantTypes[BLACK], v);
     parse_attribute("castling", v->castling);
     parse_attribute("castlingDroppedPiece", v->castlingDroppedPiece);
     parse_attribute("castlingKingsideFile", v->castlingKingsideFile);
     parse_attribute("castlingQueensideFile", v->castlingQueensideFile);
     parse_attribute("castlingRank", v->castlingRank);
     parse_attribute("castlingKingFile", v->castlingKingFile);
-    parse_attribute("castlingKingPiece", v->castlingKingPiece[WHITE], v->pieceToChar);
-    parse_attribute("castlingKingPiece", v->castlingKingPiece[BLACK], v->pieceToChar);
-    parse_attribute("castlingKingPieceWhite", v->castlingKingPiece[WHITE], v->pieceToChar);
-    parse_attribute("castlingKingPieceBlack", v->castlingKingPiece[BLACK], v->pieceToChar);
+    parse_attribute("castlingKingPiece", v->castlingKingPiece[WHITE], v);
+    parse_attribute("castlingKingPiece", v->castlingKingPiece[BLACK], v);
+    parse_attribute("castlingKingPieceWhite", v->castlingKingPiece[WHITE], v);
+    parse_attribute("castlingKingPieceBlack", v->castlingKingPiece[BLACK], v);
     parse_attribute("castlingRookKingsideFile", v->castlingRookKingsideFile);
     parse_attribute("castlingRookQueensideFile", v->castlingRookQueensideFile);
-    parse_attribute("castlingRookPieces", v->castlingRookPieces[WHITE], v->pieceToChar);
-    parse_attribute("castlingRookPieces", v->castlingRookPieces[BLACK], v->pieceToChar);
-    parse_attribute("castlingRookPiecesWhite", v->castlingRookPieces[WHITE], v->pieceToChar);
-    parse_attribute("castlingRookPiecesBlack", v->castlingRookPieces[BLACK], v->pieceToChar);
+    parse_attribute("castlingRookPieces", v->castlingRookPieces[WHITE], v);
+    parse_attribute("castlingRookPieces", v->castlingRookPieces[BLACK], v);
+    parse_attribute("castlingRookPiecesWhite", v->castlingRookPieces[WHITE], v);
+    parse_attribute("castlingRookPiecesBlack", v->castlingRookPieces[BLACK], v);
     parse_attribute("oppositeCastling", v->oppositeCastling);
     parse_attribute("checking", v->checking);
     parse_attribute("dropChecks", v->dropChecks);
     parse_attribute("mustCapture", v->mustCapture);
     parse_attribute("mustDrop", v->mustDrop);
-    parse_attribute("mustDropType", v->mustDropType, v->pieceToChar);
+    parse_attribute("mustDropType", v->mustDropType, v);
     parse_attribute("pieceDrops", v->pieceDrops);
     parse_attribute("dropLoop", v->dropLoop);
     parse_attribute("capturesToHand", v->capturesToHand);
@@ -522,12 +606,12 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     parse_attribute("sittuyinRookDrop", v->sittuyinRookDrop);
     parse_attribute("dropOppositeColoredBishop", v->dropOppositeColoredBishop);
     parse_attribute("dropPromoted", v->dropPromoted);
-    parse_attribute("dropNoDoubled", v->dropNoDoubled, v->pieceToChar);
+    parse_attribute("dropNoDoubled", v->dropNoDoubled, v);
     parse_attribute("dropNoDoubledCount", v->dropNoDoubledCount);
     parse_attribute("payPointsToDrop", v->payPointsToDrop);
     parse_attribute("potions", v->potions);
-    parse_attribute("freezePotion", v->potionPiece[Variant::POTION_FREEZE], v->pieceToChar);
-    parse_attribute("jumpPotion", v->potionPiece[Variant::POTION_JUMP], v->pieceToChar);
+    parse_attribute("freezePotion", v->potionPiece[Variant::POTION_FREEZE], v);
+    parse_attribute("jumpPotion", v->potionPiece[Variant::POTION_JUMP], v);
     parse_attribute("freezeCooldown", v->potionCooldown[Variant::POTION_FREEZE]);
     parse_attribute("jumpCooldown", v->potionCooldown[Variant::POTION_JUMP]);
     parse_attribute("potionDropOnOccupied", v->potionDropOnOccupied);
@@ -555,10 +639,10 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     parse_attribute("soldierPromotionRank", v->soldierPromotionRank);
     parse_attribute("flipEnclosedPieces", v->flipEnclosedPieces);
     // game end
-    parse_attribute("nMoveRuleTypes", v->nMoveRuleTypes[WHITE], v->pieceToChar);
-    parse_attribute("nMoveRuleTypes", v->nMoveRuleTypes[BLACK], v->pieceToChar);
-    parse_attribute("nMoveRuleTypesWhite", v->nMoveRuleTypes[WHITE], v->pieceToChar);
-    parse_attribute("nMoveRuleTypesBlack", v->nMoveRuleTypes[BLACK], v->pieceToChar);
+    parse_attribute("nMoveRuleTypes", v->nMoveRuleTypes[WHITE], v);
+    parse_attribute("nMoveRuleTypes", v->nMoveRuleTypes[BLACK], v);
+    parse_attribute("nMoveRuleTypesWhite", v->nMoveRuleTypes[WHITE], v);
+    parse_attribute("nMoveRuleTypesBlack", v->nMoveRuleTypes[BLACK], v);
     parse_attribute("nMoveRule", v->nMoveRule);
     parse_attribute("nFoldRule", v->nFoldRule);
     parse_attribute("nFoldValue", v->nFoldValue);
@@ -577,13 +661,13 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     parse_attribute("extinctionPseudoRoyal", v->extinctionPseudoRoyal);
     parse_attribute("dupleCheck", v->dupleCheck);
     // extinction piece types
-    parse_attribute("extinctionPieceTypes", v->extinctionPieceTypes, v->pieceToChar);
+    parse_attribute("extinctionPieceTypes", v->extinctionPieceTypes, v);
     parse_attribute("extinctionPieceCount", v->extinctionPieceCount);
     parse_attribute("extinctionOpponentPieceCount", v->extinctionOpponentPieceCount);
-    parse_attribute("flagPiece", v->flagPiece[WHITE], v->pieceToChar);
-    parse_attribute("flagPiece", v->flagPiece[BLACK], v->pieceToChar);
-    parse_attribute("flagPieceWhite", v->flagPiece[WHITE], v->pieceToChar);
-    parse_attribute("flagPieceBlack", v->flagPiece[BLACK], v->pieceToChar);
+    parse_attribute("flagPiece", v->flagPiece[WHITE], v);
+    parse_attribute("flagPiece", v->flagPiece[BLACK], v);
+    parse_attribute("flagPieceWhite", v->flagPiece[WHITE], v);
+    parse_attribute("flagPieceBlack", v->flagPiece[BLACK], v);
     parse_attribute("flagRegion", v->flagRegion[WHITE]);
     parse_attribute("flagRegion", v->flagRegion[BLACK]);
     parse_attribute("flagRegionWhite", v->flagRegion[WHITE]);
@@ -594,7 +678,7 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     parse_attribute("flagPieceSafe", v->flagPieceSafe);
     parse_attribute("checkCounting", v->checkCounting);
     parse_attribute("connectN", v->connectN);
-    parse_attribute("connectPieceTypes", v->connectPieceTypes, v->pieceToChar);
+    parse_attribute("connectPieceTypes", v->connectPieceTypes, v);
     parse_attribute("connectHorizontal", v->connectHorizontal);
     parse_attribute("connectVertical", v->connectVertical);
     parse_attribute("connectDiagonal", v->connectDiagonal);

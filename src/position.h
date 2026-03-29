@@ -134,6 +134,10 @@ public:
   PieceSet piece_types() const;
   const std::string& piece_to_char() const;
   const std::string& piece_to_char_synonyms() const;
+  const std::string& piece_symbol(Piece pc) const;
+  const std::string& piece_symbol_synonym(Piece pc) const;
+  Piece piece_from_symbol(const std::string& token) const;
+  PieceType piece_type_from_symbol(const std::string& token) const;
   Bitboard promotion_zone(Color c) const;
   Square promotion_square(Color c, Square s) const;
   PieceType main_promotion_pawn_type(Color c) const;
@@ -492,6 +496,26 @@ inline const std::string& Position::piece_to_char() const {
 inline const std::string& Position::piece_to_char_synonyms() const {
   assert(var != nullptr);
   return var->pieceToCharSynonyms;
+}
+
+inline const std::string& Position::piece_symbol(Piece pc) const {
+  assert(var != nullptr);
+  return var->piece_symbol(pc);
+}
+
+inline const std::string& Position::piece_symbol_synonym(Piece pc) const {
+  assert(var != nullptr);
+  return var->piece_symbol_synonym(pc);
+}
+
+inline Piece Position::piece_from_symbol(const std::string& token) const {
+  assert(var != nullptr);
+  return var->piece_from_symbol(token);
+}
+
+inline PieceType Position::piece_type_from_symbol(const std::string& token) const {
+  assert(var != nullptr);
+  return var->piece_type_from_symbol(token);
 }
 
 inline Bitboard Position::promotion_zone(Color c) const {

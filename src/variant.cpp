@@ -32,6 +32,65 @@ namespace Stockfish {
 VariantMap variants; // Global object
 
 namespace {
+    int count_piece_symbol_in_fen(const std::string& fenBoard, const std::string& symbol) {
+        if (symbol.empty())
+            return 0;
+
+        int count = 0;
+        for (size_t i = 0; i < fenBoard.size(); ++i)
+        {
+            char c = fenBoard[i];
+            if (std::isspace(static_cast<unsigned char>(c)))
+                break;
+            if (c == '+')
+            {
+                if (++i >= fenBoard.size())
+                    break;
+                c = fenBoard[i];
+            }
+            if (Variant::is_piece_id_start(c))
+            {
+                std::string token(1, c);
+                if (i + 1 < fenBoard.size() && Variant::is_piece_id_suffix(fenBoard[i + 1]))
+                {
+                    token.push_back(fenBoard[i + 1]);
+                    ++i;
+                }
+                if (token == symbol)
+                    ++count;
+            }
+        }
+        return count;
+    }
+
+    int count_all_pieces_in_fen(const std::string& fenBoard, const Variant* v) {
+        int count = 0;
+        for (size_t i = 0; i < fenBoard.size(); ++i)
+        {
+            char c = fenBoard[i];
+            if (std::isspace(static_cast<unsigned char>(c)))
+                break;
+            if (c == '+')
+            {
+                if (++i >= fenBoard.size())
+                    break;
+                c = fenBoard[i];
+            }
+            if (Variant::is_piece_id_start(c))
+            {
+                std::string token(1, c);
+                if (i + 1 < fenBoard.size() && Variant::is_piece_id_suffix(fenBoard[i + 1]))
+                {
+                    token.push_back(fenBoard[i + 1]);
+                    ++i;
+                }
+                if (v->piece_type_from_symbol(token) != NO_PIECE_TYPE)
+                    ++count;
+            }
+        }
+        return count;
+    }
+
     // Base variant
     Variant* variant_base() {
         Variant* v = new Variant();
@@ -2000,8 +2059,8 @@ Variant* Variant::conclude() {
     {
         std::string fenBoard = startFen.substr(0, startFen.find(' '));
         // Switch NNUE from KA to A if there is no unique piece
-        if (   std::count(fenBoard.begin(), fenBoard.end(), pieceToChar[make_piece(WHITE, nnueKing)]) != 1
-            || std::count(fenBoard.begin(), fenBoard.end(), pieceToChar[make_piece(BLACK, nnueKing)]) != 1)
+        if (   count_piece_symbol_in_fen(fenBoard, piece_symbol(make_piece(WHITE, nnueKing))) != 1
+            || count_piece_symbol_in_fen(fenBoard, piece_symbol(make_piece(BLACK, nnueKing))) != 1)
             nnueKing = NO_PIECE_TYPE;
     }
     // We can not use popcount here yet, as the lookup tables are initialized after the variants
@@ -2067,15 +2126,8 @@ Variant* Variant::conclude() {
     nnueDimensions = nnueKingSquare * nnuePieceIndices;
 
     // Determine maximum piece count
-    std::istringstream ss(startFen);
-    ss >> std::noskipws;
-    unsigned char token;
-    nnueMaxPieces = 0;
-    while ((ss >> token) && !isspace(token))
-    {
-        if (pieceToChar.find(token) != std::string::npos || pieceToCharSynonyms.find(token) != std::string::npos)
-            nnueMaxPieces++;
-    }
+    std::string fenBoard = startFen.substr(0, startFen.find(' '));
+    nnueMaxPieces = count_all_pieces_in_fen(fenBoard, this);
     if (twoBoards)
         nnueMaxPieces *= 2;
 
