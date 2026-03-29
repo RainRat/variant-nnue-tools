@@ -24,6 +24,20 @@ cd src
 make -j4 build ARCH=x86-64-modern largeboards=yes
 ```
 
+For variants whose training format needs a larger PackedSFEN buffer:
+
+```bash
+cd src
+make -j4 build ARCH=x86-64-modern largedata=yes
+```
+
+If needed, combine both:
+
+```bash
+cd src
+make -j4 build ARCH=x86-64-modern largeboards=yes largedata=yes
+```
+
 ## 2. Generate trainer config
 
 You can do it manually:
@@ -109,6 +123,10 @@ setoption name Use NNUE value pure
 - `trainer_config` crashes or errors on an unknown variant:
   - make sure the variant is actually loadable by this binary
   - if the variant is external, pass `--variant-path`
+
+- `trainer_config` warns that the required `DATA_SIZE` exceeds the current build:
+  - rebuild with `largedata=yes`
+  - combine with `largeboards=yes` if the variant also needs a larger board build
 
 - `compile_data_loader` / CMake confusion:
   - use `sh compile_data_loader.bat` on Linux/macOS
