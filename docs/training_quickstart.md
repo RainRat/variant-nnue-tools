@@ -118,6 +118,13 @@ setoption name EvalFile value /path/to/kooshi.nnue
 setoption name Use NNUE value pure
 ```
 
+To smoke-check the load first:
+
+```bash
+script/check_evalfile.sh src/stockfish ko-oshi /abs/path/to/kooshi.nnue \
+  --variant-path /path/to/variants.ini
+```
+
 ## Common failure modes
 
 - `trainer_config` crashes or errors on an unknown variant:
@@ -131,6 +138,13 @@ setoption name Use NNUE value pure
 - `compile_data_loader` / CMake confusion:
   - use `script/compile_data_loader.sh /path/to/variant-nnue-pytorch`
   - if you want to run CMake manually, the script is just a thin wrapper around the trainer repo's `compile_data_loader.bat`
+
+- `EvalFile` does not load:
+  - use an absolute path first
+  - use `script/check_evalfile.sh` to distinguish:
+    - missing file / wrong path
+    - unknown variant / missing `VariantPath`
+    - incompatible net that fails engine-side loading
 
 - `ModuleNotFoundError: pkg_resources` in the trainer:
   - install `setuptools<81` inside the trainer virtualenv

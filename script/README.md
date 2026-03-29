@@ -27,6 +27,17 @@ script/compile_data_loader.sh /path/to/variant-nnue-pytorch
 
 If no path is given, it defaults to `../variant-nnue-pytorch` relative to this repo.
 
+# `check_evalfile.sh`
+
+Use this helper to verify that a trained `.nnue` actually loads for a given variant.
+
+Example:
+
+```bash
+script/check_evalfile.sh src/stockfish ko-oshi /path/to/net.nnue \
+  --variant-path /path/to/variants.ini
+```
+
     pip install python-chess
 	
 
