@@ -326,7 +326,7 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
       incremented after Black's move.
 */
 
-  unsigned char col, row, token;
+  unsigned char col, token;
   std::istringstream ss(fenStr);
 
   std::memset(this, 0, sizeof(Position));
@@ -518,10 +518,42 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
       // 4. En passant square.
       // Ignore if square is invalid or not on side to move relative rank 6.
       else
-          while (   ((ss >> col) && (col >= 'a' && col <= 'a' + max_file()))
-                 && ((ss >> row) && (row >= '1' && row <= '1' + max_rank())))
+      {
+          std::string epSpec;
+          ss >> epSpec;
+          if (epSpec == "-")
+              epSpec.clear();
+
+          for (std::size_t i = 0; i < epSpec.size();)
           {
-              Square epSquare = make_square(File(col - 'a'), Rank(row - '1'));
+              col = epSpec[i++];
+              if (col < 'a' || col > 'a' + max_file())
+                  break;
+
+              std::string rankDigits;
+              while (i < epSpec.size() && std::isdigit(static_cast<unsigned char>(epSpec[i])))
+                  rankDigits.push_back(epSpec[i++]);
+              if (rankDigits.empty())
+                  break;
+
+              int rankNumber = 0;
+              bool rankOverflow = false;
+              for (char d : rankDigits)
+              {
+                  int digit = d - '0';
+                  if (rankNumber > (std::numeric_limits<int>::max() - digit) / 10)
+                  {
+                      rankOverflow = true;
+                      break;
+                  }
+                  rankNumber = rankNumber * 10 + digit;
+              }
+              if (rankOverflow)
+                  continue;
+              if (rankNumber < 1 || rankNumber > max_rank() + 1)
+                  continue;
+
+              Square epSquare = make_square(File(col - 'a'), Rank(rankNumber - 1));
 #ifdef LARGEBOARDS
               // Consider different rank numbering in CECP
               if (max_rank() == RANK_10 && CurrentProtocol == XBOARD)
@@ -545,6 +577,7 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
                           && !((pieces(WHITE) | pieces(BLACK)) & (epSquare | (epSquare + pawn_push(sideToMove)))))))
                   st->epSquares |= epSquare;
           }
+      }
   }
 
   // Check counter for nCheck
