@@ -25,6 +25,7 @@
 #include <string>
 
 #include "nnue/evaluate_nnue.h"
+#include "nnue/features/half_ka_v2_variants.h"
 #include "evaluate.h"
 #include "movegen.h"
 #include "position.h"
@@ -410,6 +411,11 @@ void search_mcts_cmd(Position& pos, istringstream& is)
     << "#define PIECE_COUNT " << v->nnueMaxPieces << std::endl
     << "#define POCKETS " << (v->nnueUsePockets ? "true" : "false") << std::endl
     << "#define KING_SQUARES " << v->nnueKingSquare << std::endl
+    << "#define NNUE_INPUT_DIMS " << v->nnueDimensions << std::endl
+    << "#define NNUE_FEATURE_HASH 0x" << std::hex << std::uppercase
+    << Eval::NNUE::Features::HalfKAv2Variants::HashValue << std::dec << std::nouppercase << std::endl
+    << "#define NNUE_NET_HASH 0x" << std::hex << std::uppercase
+    << Eval::NNUE::HashValue << std::dec << std::nouppercase << std::endl
     << "#define DATA_SIZE " << DATA_SIZE << std::endl;
 
     if (out1.is_open()) {
@@ -429,6 +435,11 @@ void search_mcts_cmd(Position& pos, istringstream& is)
     << "PIECES = 2 * PIECE_TYPES" << std::endl
     << "USE_POCKETS = " << (v->nnueUsePockets ? "True" : "False") << std::endl
     << "POCKETS = 2 * FILES if USE_POCKETS else 0" << std::endl
+    << "NNUE_INPUT_DIMS = " << v->nnueDimensions << std::endl
+    << "NNUE_FEATURE_HASH = 0x" << std::hex << std::uppercase
+    << Eval::NNUE::Features::HalfKAv2Variants::HashValue << std::dec << std::nouppercase << std::endl
+    << "NNUE_NET_HASH = 0x" << std::hex << std::uppercase
+    << Eval::NNUE::HashValue << std::dec << std::nouppercase << std::endl
     << std::endl
     << "PIECE_VALUES = {" << std::endl;
     for (PieceSet ps = v->pieceTypes; ps;)
