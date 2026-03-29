@@ -129,7 +129,8 @@ setoption name Use NNUE value pure
   - combine with `largeboards=yes` if the variant also needs a larger board build
 
 - `compile_data_loader` / CMake confusion:
-  - use `sh compile_data_loader.bat` on Linux/macOS
+  - use `script/compile_data_loader.sh /path/to/variant-nnue-pytorch`
+  - if you want to run CMake manually, the script is just a thin wrapper around the trainer repo's `compile_data_loader.bat`
 
 - `ModuleNotFoundError: pkg_resources` in the trainer:
   - install `setuptools<81` inside the trainer virtualenv

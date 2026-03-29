@@ -15,6 +15,17 @@ script/prepare_trainer.sh src/stockfish ko-oshi /tmp/kooshi-cfg \
 
 It does not launch training. It only generates and optionally copies the trainer config.
 
+# `compile_data_loader.sh`
+
+Use this helper on Linux/macOS instead of invoking `compile_data_loader.bat` through `sh`.
+
+Example:
+
+```bash
+script/compile_data_loader.sh /path/to/variant-nnue-pytorch
+```
+
+If no path is given, it defaults to `../variant-nnue-pytorch` relative to this repo.
 
     pip install python-chess
 	
@@ -62,4 +73,3 @@ You also need to prepare validation data for training like following.
     ./stockfish
 	setoption name Threads value 8
     learn shuffled_sfen.bin newbob_decay 0.5  validation_set_file_name ccrl-40-15-3400_plain.bin  nn_batch_size 50000 batchsize 1000000 eval_save_interval 8000000 eta 0.05 lambda 0.0 eval_limit 3000 mirror_percentage 0 use_draw_in_training 1
-
