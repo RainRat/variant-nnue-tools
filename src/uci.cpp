@@ -394,17 +394,18 @@ void search_mcts_cmd(Position& pos, istringstream& is)
 
     const Variant* v = variants.find(variant)->second;
     const bool nnueHasWalls = v->nnueWallIndexBase >= 0;
-    const bool nnueHasPoints = v->nnuePointsIndexBase >= 0;
+    const bool nnueHasPointScores = v->nnuePointsScorePlanes > 0;
     const bool nnueHasChecks = v->nnuePointsCheckPlanes > 0;
+    const bool nnueHasPointsState = v->nnuePointsIndexBase >= 0 && (nnueHasPointScores || nnueHasChecks);
     const bool nnueHasPotions = v->nnuePotionZoneIndexBase >= 0;
     const std::uint32_t nnueFeatureHash =
         nnueHasWalls
-            ? (nnueHasPoints
+            ? (nnueHasPointsState
                    ? (nnueHasPotions ? Eval::NNUE::Features::HalfKAv2Variants::HashValueWithWallsPointsAndPotions
                                      : Eval::NNUE::Features::HalfKAv2Variants::HashValueWithWallsAndPoints)
                    : (nnueHasPotions ? Eval::NNUE::Features::HalfKAv2Variants::HashValueWithWallsAndPotions
                                      : Eval::NNUE::Features::HalfKAv2Variants::HashValueWithWalls))
-            : (nnueHasPoints
+            : (nnueHasPointsState
                    ? (nnueHasPotions ? Eval::NNUE::Features::HalfKAv2Variants::HashValueWithPointsAndPotions
                                      : Eval::NNUE::Features::HalfKAv2Variants::HashValueWithPoints)
                    : (nnueHasPotions ? Eval::NNUE::Features::HalfKAv2Variants::HashValueWithPotions
@@ -434,7 +435,7 @@ void search_mcts_cmd(Position& pos, istringstream& is)
     const int boardBits = useWide ? boardSquares * pieceBits : boardSquares * 6;
     const int dataBits = 1 + 2 * kingBits + boardBits
                        + (nnueHasWalls ? squares : 0)
-                       + (nnueHasPoints ? 2 * POINTS_SCORE_BITS : 0)
+                       + (nnueHasPointScores ? 2 * POINTS_SCORE_BITS : 0)
                        + (nnueHasChecks ? 2 * CHECKS_BITS : 0)
                        + (nnueHasPotions ? COLOR_NB * Variant::POTION_TYPE_NB * (squares + POTION_COOLDOWN_BITS) : 0)
                        + 2 * pieceTypes * pocketBits + 4 + 1 + epBits + 6 + 8 + 8 + 1;
@@ -460,7 +461,7 @@ void search_mcts_cmd(Position& pos, istringstream& is)
     << "#define PIECE_COUNT " << v->nnueMaxPieces << std::endl
     << "#define POCKETS " << (v->nnueUsePockets ? "true" : "false") << std::endl
     << "#define HAS_WALLS " << (nnueHasWalls ? "true" : "false") << std::endl
-    << "#define HAS_POINTS " << (nnueHasPoints ? "true" : "false") << std::endl
+    << "#define HAS_POINTS " << (nnueHasPointScores ? "true" : "false") << std::endl
     << "#define HAS_CHECKS " << (nnueHasChecks ? "true" : "false") << std::endl
     << "#define HAS_POTIONS " << (nnueHasPotions ? "true" : "false") << std::endl
     << "#define POINTS_SCORE_BITS " << POINTS_SCORE_BITS << std::endl
@@ -496,7 +497,7 @@ void search_mcts_cmd(Position& pos, istringstream& is)
     << "USE_POCKETS = " << (v->nnueUsePockets ? "True" : "False") << std::endl
     << "POCKETS = 2 * FILES if USE_POCKETS else 0" << std::endl
     << "HAS_WALLS = " << (nnueHasWalls ? "True" : "False") << std::endl
-    << "HAS_POINTS = " << (nnueHasPoints ? "True" : "False") << std::endl
+    << "HAS_POINTS = " << (nnueHasPointScores ? "True" : "False") << std::endl
     << "HAS_CHECKS = " << (nnueHasChecks ? "True" : "False") << std::endl
     << "HAS_POTIONS = " << (nnueHasPotions ? "True" : "False") << std::endl
     << "POINTS_SCORE_BITS = " << POINTS_SCORE_BITS << std::endl
