@@ -304,6 +304,7 @@ constexpr int CHECKS_BITS = 4;
 constexpr int CHECKS_MAX = (1 << CHECKS_BITS) - 1;
 constexpr int POINTS_SCORE_BITS = 8;
 constexpr int POINTS_SCORE_MAX = (1 << POINTS_SCORE_BITS) - 1;
+constexpr int POTION_COOLDOWN_BITS = 16;
 
 enum MaterialCounting {
   NO_MATERIAL_COUNTING, JANGGI_MATERIAL, UNWEIGHTED_MATERIAL, WHITE_DRAW_ODDS, BLACK_DRAW_ODDS

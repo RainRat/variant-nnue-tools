@@ -219,6 +219,22 @@ namespace Stockfish::Tools {
             for (auto c : Colors)
                 stream.write_n_bit(std::min<int>(std::max(0, int(pos.checks_remaining(c))), CHECKS_MAX), CHECKS_BITS);
 
+        if (pos.nnue_potion_zone_index_base() >= 0)
+            for (Color c : {WHITE, BLACK})
+                for (int pt = 0; pt < Variant::POTION_TYPE_NB; ++pt)
+                {
+                    Variant::PotionType potion = static_cast<Variant::PotionType>(pt);
+                    if (pos.potion_piece(potion) == NO_PIECE_TYPE)
+                        continue;
+                    for (Rank r = pos.max_rank(); r >= RANK_1; --r)
+                        for (File f = FILE_A; f <= pos.max_file(); ++f)
+                        {
+                            Square sq = make_square(f, r);
+                            stream.write_one_bit((pos.potion_zone(c, potion) & square_bb(sq)) ? 1 : 0);
+                        }
+                    stream.write_n_bit(std::max(0, pos.potion_cooldown(c, potion)), POTION_COOLDOWN_BITS);
+                }
+
         for(auto c: Colors)
             for (PieceSet ps = pos.piece_types(); ps;)
                 stream.write_n_bit(pos.count_in_hand(c, pop_lsb(ps)), DATA_SIZE > 512 ? 7 : 5);
@@ -387,6 +403,23 @@ namespace Stockfish::Tools {
         if (pos.nnue_points_check_planes())
             for (auto c : Colors)
                 pos.st->checksRemaining[c] = CheckCount(stream.read_n_bit(CHECKS_BITS));
+
+        if (pos.nnue_potion_zone_index_base() >= 0)
+            for (Color c : {WHITE, BLACK})
+                for (int pt = 0; pt < Variant::POTION_TYPE_NB; ++pt)
+                {
+                    Variant::PotionType potion = static_cast<Variant::PotionType>(pt);
+                    if (pos.potion_piece(potion) == NO_PIECE_TYPE)
+                        continue;
+                    for (Rank r = pos.max_rank(); r >= RANK_1; --r)
+                        for (File f = FILE_A; f <= pos.max_file(); ++f)
+                        {
+                            auto sq = make_square(f, r);
+                            if (stream.read_one_bit())
+                                pos.st->potionZones[c][pt] |= square_bb(sq);
+                        }
+                    pos.st->potionCooldown[c][pt] = stream.read_n_bit(POTION_COOLDOWN_BITS);
+                }
 
         // Hand pieces - read the counts for each color and piece type
         for(auto c: Colors)

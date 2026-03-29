@@ -1003,12 +1003,19 @@ inline FenValidation validate_fen(const std::string& fen, const Variant* v, bool
 
     std::size_t pointsStart = fen.find('{');
     std::size_t pointsEnd = fen.find('}', pointsStart);
+    std::size_t cooldownStart = fen.find('<');
+    std::size_t cooldownEnd = fen.find('>', cooldownStart);
     std::string pointsCount = "";
+    std::string potionCooldowns = "";
     std::string modifiedFen = fen;
 
     if (pointsStart != std::string::npos && pointsEnd != std::string::npos && pointsEnd > pointsStart) {
         pointsCount = fen.substr(pointsStart, pointsEnd - pointsStart + 1);
         modifiedFen.erase(pointsStart, pointsEnd - pointsStart + 1);
+    }
+    if (cooldownStart != std::string::npos && cooldownEnd != std::string::npos && cooldownEnd > cooldownStart) {
+        potionCooldowns = fen.substr(cooldownStart, cooldownEnd - cooldownStart + 1);
+        modifiedFen.erase(cooldownStart, cooldownEnd - cooldownStart + 1);
     }
 
     std::vector<std::string> fenParts = get_fen_parts(modifiedFen, ' ');
@@ -1176,6 +1183,12 @@ inline FenValidation validate_fen(const std::string& fen, const Variant* v, bool
             || check_digit_field(points[0]) == NOK
             || check_digit_field(points[1]) == NOK)
         {
+            return FEN_INVALID_POINTS_INFO;
+        }
+    }
+
+    if (!potionCooldowns.empty()) {
+        if (potionCooldowns.front() != '<' || potionCooldowns.back() != '>') {
             return FEN_INVALID_POINTS_INFO;
         }
     }

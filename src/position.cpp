@@ -51,6 +51,8 @@ namespace Zobrist {
   Key inHand[PIECE_NB][SQUARE_NB];
   Key checks[COLOR_NB][CHECKS_NB];
   Key wall[SQUARE_NB];
+  Key potionZone[COLOR_NB][Variant::POTION_TYPE_NB][SQUARE_NB];
+  Key potionCooldown[COLOR_NB][Variant::POTION_TYPE_NB][POTION_COOLDOWN_BITS];
   Key endgame[EG_EVAL_NB];
   Key points[COLOR_NB][MAX_ZOBRIST_POINTS];
 }
@@ -170,6 +172,27 @@ inline int non_negative_points(int points) {
   return std::max(points, 0);
 }
 
+inline void xor_potion_zone(Key& k, Color c, Variant::PotionType potion, Bitboard zone) {
+  while (zone)
+      k ^= Zobrist::potionZone[c][potion][pop_lsb(zone)];
+}
+
+inline void xor_potion_cooldown(Key& k, Color c, Variant::PotionType potion, int cooldown) {
+  unsigned value = static_cast<unsigned>(std::max(cooldown, 0));
+  for (int bit = 0; bit < POTION_COOLDOWN_BITS; ++bit)
+      if (value & (1u << bit))
+          k ^= Zobrist::potionCooldown[c][potion][bit];
+}
+
+inline std::array<int, 4> parse_potion_cooldowns(std::string content) {
+  std::array<int, 4> vals = {0, 0, 0, 0};
+  std::replace(content.begin(), content.end(), ',', ' ');
+  std::stringstream ss(content);
+  for (int i = 0; i < 4 && ss; ++i)
+      ss >> vals[i];
+  return vals;
+}
+
 
 /// Position::init() initializes at startup the various arrays used to compute hash keys
 
@@ -202,6 +225,14 @@ void Position::init() {
 
   for (Square s = SQ_A1; s <= SQ_MAX; ++s)
       Zobrist::wall[s] = rng.rand<Key>();
+
+  for (Color c : {WHITE, BLACK})
+      for (int pt = 0; pt < Variant::POTION_TYPE_NB; ++pt) {
+          for (Square s = SQ_A1; s <= SQ_MAX; ++s)
+              Zobrist::potionZone[c][pt][s] = rng.rand<Key>();
+          for (int bit = 0; bit < POTION_COOLDOWN_BITS; ++bit)
+              Zobrist::potionCooldown[c][pt][bit] = rng.rand<Key>();
+      }
 
   for (int i = NO_EG_EVAL; i < EG_EVAL_NB; ++i)
       Zobrist::endgame[i] = rng.rand<Key>();
@@ -580,6 +611,64 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
       }
   }
 
+  if (potions_enabled())
+  {
+      ss >> std::ws;
+      std::string potionSpec;
+      if (ss.peek() == 'f' || ss.peek() == 'j' || ss.peek() == '-')
+          ss >> potionSpec;
+
+      if (!potionSpec.empty() && potionSpec != "-")
+      {
+          Color zoneColor = ~sideToMove;
+          if (potionSpec.size() > 2 && potionSpec[1] == ':')
+          {
+              Square zoneCenter = SQ_NONE;
+              std::string sqText = potionSpec.substr(2);
+              if (sqText.size() >= 2)
+              {
+                  char fileCh = sqText[0];
+                  int rankVal = 0;
+                  bool okRank = true;
+                  for (size_t i = 1; i < sqText.size(); ++i)
+                  {
+                      if (!isdigit(static_cast<unsigned char>(sqText[i])))
+                      {
+                          okRank = false;
+                          break;
+                      }
+                      rankVal = rankVal * 10 + (sqText[i] - '0');
+                  }
+                  if (okRank && fileCh >= 'a' && fileCh <= 'a' + max_file()
+                      && rankVal >= 1 && rankVal <= max_rank() + 1)
+                      zoneCenter = make_square(File(fileCh - 'a'), Rank(rankVal - 1));
+              }
+              if (is_ok(zoneCenter))
+              {
+                  if (potionSpec[0] == 'f')
+                      st->potionZones[zoneColor][Variant::POTION_FREEZE] = square_bb(zoneCenter);
+                  else if (potionSpec[0] == 'j')
+                      st->potionZones[zoneColor][Variant::POTION_JUMP] = square_bb(zoneCenter);
+              }
+          }
+      }
+
+      ss >> std::ws;
+      if (ss.peek() == '<')
+      {
+          char open = 0;
+          ss >> open;
+          std::string cooldownSpec;
+          std::getline(ss, cooldownSpec, '>');
+          auto vals = parse_potion_cooldowns(cooldownSpec);
+          int maxCooldown = (1 << POTION_COOLDOWN_BITS) - 1;
+          st->potionCooldown[WHITE][Variant::POTION_FREEZE] = std::min(vals[0], maxCooldown);
+          st->potionCooldown[WHITE][Variant::POTION_JUMP]   = std::min(vals[1], maxCooldown);
+          st->potionCooldown[BLACK][Variant::POTION_FREEZE] = std::min(vals[2], maxCooldown);
+          st->potionCooldown[BLACK][Variant::POTION_JUMP]   = std::min(vals[3], maxCooldown);
+      }
+  }
+
   chess960 = isChess960 || v->chess960;
   tsumeMode = Options["TsumeMode"];
   thisThread = th;
@@ -712,6 +801,17 @@ void Position::set_state(StateInfo* si) const {
   if (var->pointsCounting)
       for (Color c : {WHITE, BLACK})
           xor_points_bucket(si->key, c, si->pointsCount[c]);
+
+  if (potions_enabled())
+      for (Color c : {WHITE, BLACK})
+          for (int pt = 0; pt < Variant::POTION_TYPE_NB; ++pt)
+          {
+              Variant::PotionType potion = static_cast<Variant::PotionType>(pt);
+              if (potion_piece(potion) == NO_PIECE_TYPE)
+                  continue;
+              xor_potion_zone(si->key, c, potion, si->potionZones[c][pt]);
+              xor_potion_cooldown(si->key, c, potion, si->potionCooldown[c][pt]);
+          }
 }
 
 
@@ -881,6 +981,29 @@ string Position::fen(bool sfen, bool showPromoted, int countStarted, std::string
 
   if (variant()->pointsCounting)
       ss << " {" << st->pointsCount[WHITE] << " " << st->pointsCount[BLACK] << "}";
+
+  if (potions_enabled())
+  {
+      bool wroteZone = false;
+      Color zoneColor = ~sideToMove;
+      if (st->potionZones[zoneColor][Variant::POTION_FREEZE])
+      {
+          ss << " f:" << UCI::square(*this, lsb(st->potionZones[zoneColor][Variant::POTION_FREEZE]));
+          wroteZone = true;
+      }
+      else if (st->potionZones[zoneColor][Variant::POTION_JUMP])
+      {
+          ss << " j:" << UCI::square(*this, lsb(st->potionZones[zoneColor][Variant::POTION_JUMP]));
+          wroteZone = true;
+      }
+      if (!wroteZone)
+          ss << " -";
+      ss << " <"
+         << st->potionCooldown[WHITE][Variant::POTION_FREEZE] << " "
+         << st->potionCooldown[WHITE][Variant::POTION_JUMP] << " "
+         << st->potionCooldown[BLACK][Variant::POTION_FREEZE] << " "
+         << st->potionCooldown[BLACK][Variant::POTION_JUMP] << ">";
+  }
 
   return ss.str();
 }

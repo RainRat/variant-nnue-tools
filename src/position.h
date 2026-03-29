@@ -60,6 +60,8 @@ struct StateInfo {
   Square castlingKingSquare[COLOR_NB];
   Bitboard wallSquares;
   Bitboard gatesBB[COLOR_NB];
+  Bitboard potionZones[COLOR_NB][Variant::POTION_TYPE_NB];
+  int potionCooldown[COLOR_NB][Variant::POTION_TYPE_NB];
 
   // Not copied when making a move (will be recomputed anyhow)
   Key        key;
@@ -169,6 +171,8 @@ public:
   int nnue_points_index_base() const;
   int nnue_points_score_planes() const;
   int nnue_points_check_planes() const;
+  int nnue_potion_zone_index_base() const;
+  int nnue_potion_cooldown_index_base() const;
   bool free_drops() const;
   bool fast_attacks() const;
   bool fast_attacks2() const;
@@ -192,6 +196,10 @@ public:
   PieceSet promotion_pawn_types(Color c) const;
   PieceSet en_passant_types(Color c) const;
   bool immobility_illegal() const;
+  bool potions_enabled() const;
+  PieceType potion_piece(Variant::PotionType type) const;
+  Bitboard potion_zone(Color c, Variant::PotionType type) const;
+  int potion_cooldown(Color c, Variant::PotionType type) const;
   bool gating() const;
   bool walling() const;
   WallingRule walling_rule() const;
@@ -673,6 +681,16 @@ inline int Position::nnue_points_check_planes() const {
   return var->nnuePointsCheckPlanes;
 }
 
+inline int Position::nnue_potion_zone_index_base() const {
+  assert(var != nullptr);
+  return var->nnuePotionZoneIndexBase;
+}
+
+inline int Position::nnue_potion_cooldown_index_base() const {
+  assert(var != nullptr);
+  return var->nnuePotionCooldownIndexBase;
+}
+
 inline bool Position::checking_permitted() const {
   assert(var != nullptr);
   return var->checking;
@@ -895,6 +913,23 @@ inline PieceSet Position::en_passant_types(Color c) const {
 inline bool Position::immobility_illegal() const {
   assert(var != nullptr);
   return var->immobilityIllegal;
+}
+
+inline bool Position::potions_enabled() const {
+  assert(var != nullptr);
+  return var->potions;
+}
+
+inline PieceType Position::potion_piece(Variant::PotionType type) const {
+  return var->potionPiece[type];
+}
+
+inline Bitboard Position::potion_zone(Color c, Variant::PotionType type) const {
+  return st->potionZones[c][type];
+}
+
+inline int Position::potion_cooldown(Color c, Variant::PotionType type) const {
+  return st->potionCooldown[c][type];
 }
 
 inline bool Position::gating() const {

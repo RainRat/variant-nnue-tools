@@ -171,6 +171,17 @@ struct Variant {
   Value pointsGoalSimulValueByMover = VALUE_NONE;
   int pointsGoal = 0;
 
+  enum PotionType : int {
+      POTION_FREEZE,
+      POTION_JUMP,
+      POTION_TYPE_NB
+  };
+
+  bool potions = false;
+  PieceType potionPiece[POTION_TYPE_NB] = {NO_PIECE_TYPE, NO_PIECE_TYPE};
+  int potionCooldown[POTION_TYPE_NB] = {};
+  bool potionDropOnOccupied = false;
+
   // Derived properties
   bool fastAttacks = true;
   bool fastAttacks2 = true;
@@ -182,6 +193,8 @@ struct Variant {
   int nnuePointsIndexBase = -1;
   int nnuePointsScorePlanes = 0;
   int nnuePointsCheckPlanes = 0;
+  int nnuePotionZoneIndexBase = -1;
+  int nnuePotionCooldownIndexBase = -1;
   bool nnueUsePockets = false;
   int pieceSquareIndex[COLOR_NB][PIECE_NB];
   int pieceHandIndex[COLOR_NB][PIECE_NB];
