@@ -1,7 +1,7 @@
 #ifndef _SFEN_PACKER_H_
 #define _SFEN_PACKER_H_
 
-#include "types.h"
+#include "../types.h"
 
 #include "packed_sfen.h"
 

@@ -4,7 +4,7 @@
 #include <vector>
 #include <cstdint>
 
-#include "types.h"
+#include "../types.h"
 
 namespace Stockfish::Tools {
 
