@@ -54,11 +54,14 @@ struct StateInfo {
   int    pliesFromNull;
   int    countingPly;
   int    countingLimit;
+  int    pointsCount[COLOR_NB];
   CheckCount checksRemaining[COLOR_NB];
   Bitboard epSquares;
   Square castlingKingSquare[COLOR_NB];
   Bitboard wallSquares;
   Bitboard gatesBB[COLOR_NB];
+  Bitboard potionZones[COLOR_NB][Variant::POTION_TYPE_NB];
+  int potionCooldown[COLOR_NB][Variant::POTION_TYPE_NB];
 
   // Not copied when making a move (will be recomputed anyhow)
   Key        key;
@@ -131,6 +134,10 @@ public:
   PieceSet piece_types() const;
   const std::string& piece_to_char() const;
   const std::string& piece_to_char_synonyms() const;
+  const std::string& piece_symbol(Piece pc) const;
+  const std::string& piece_symbol_synonym(Piece pc) const;
+  Piece piece_from_symbol(const std::string& token) const;
+  PieceType piece_type_from_symbol(const std::string& token) const;
   Bitboard promotion_zone(Color c) const;
   Square promotion_square(Color c, Square s) const;
   PieceType main_promotion_pawn_type(Color c) const;
@@ -164,6 +171,12 @@ public:
   int nnue_piece_square_index(Color perspective, Piece pc) const;
   int nnue_piece_hand_index(Color perspective, Piece pc) const;
   int nnue_king_square_index(Square ksq) const;
+  int nnue_wall_index_base() const;
+  int nnue_points_index_base() const;
+  int nnue_points_score_planes() const;
+  int nnue_points_check_planes() const;
+  int nnue_potion_zone_index_base() const;
+  int nnue_potion_cooldown_index_base() const;
   bool free_drops() const;
   bool fast_attacks() const;
   bool fast_attacks2() const;
@@ -187,6 +200,10 @@ public:
   PieceSet promotion_pawn_types(Color c) const;
   PieceSet en_passant_types(Color c) const;
   bool immobility_illegal() const;
+  bool potions_enabled() const;
+  PieceType potion_piece(Variant::PotionType type) const;
+  Bitboard potion_zone(Color c, Variant::PotionType type) const;
+  int potion_cooldown(Color c, Variant::PotionType type) const;
   bool gating() const;
   bool walling() const;
   WallingRule walling_rule() const;
@@ -229,6 +246,15 @@ public:
   CheckCount checks_remaining(Color c) const;
   MaterialCounting material_counting() const;
   CountingRule counting_rule() const;
+  bool points_counting() const;
+  PointsRule points_rule_captures() const;
+  int points_goal() const;
+  int points_count(Color c) const;
+  int points_score(Color c) const;
+  int points_score_clamped(Color c) const;
+  Value points_goal_value() const;
+  Value points_goal_simul_value_by_most_points() const;
+  Value points_goal_simul_value_by_mover() const;
 
   // Variant-specific properties
   int count_in_hand(PieceType pt) const;
@@ -472,6 +498,26 @@ inline const std::string& Position::piece_to_char_synonyms() const {
   return var->pieceToCharSynonyms;
 }
 
+inline const std::string& Position::piece_symbol(Piece pc) const {
+  assert(var != nullptr);
+  return var->piece_symbol(pc);
+}
+
+inline const std::string& Position::piece_symbol_synonym(Piece pc) const {
+  assert(var != nullptr);
+  return var->piece_symbol_synonym(pc);
+}
+
+inline Piece Position::piece_from_symbol(const std::string& token) const {
+  assert(var != nullptr);
+  return var->piece_from_symbol(token);
+}
+
+inline PieceType Position::piece_type_from_symbol(const std::string& token) const {
+  assert(var != nullptr);
+  return var->piece_type_from_symbol(token);
+}
+
 inline Bitboard Position::promotion_zone(Color c) const {
   assert(var != nullptr);
   return var->promotionRegion[c];
@@ -637,6 +683,36 @@ inline int Position::nnue_piece_hand_index(Color perspective, Piece pc) const {
 inline int Position::nnue_king_square_index(Square ksq) const {
   assert(var != nullptr);
   return var->kingSquareIndex[ksq];
+}
+
+inline int Position::nnue_wall_index_base() const {
+  assert(var != nullptr);
+  return var->nnueWallIndexBase;
+}
+
+inline int Position::nnue_points_index_base() const {
+  assert(var != nullptr);
+  return var->nnuePointsIndexBase;
+}
+
+inline int Position::nnue_points_score_planes() const {
+  assert(var != nullptr);
+  return var->nnuePointsScorePlanes;
+}
+
+inline int Position::nnue_points_check_planes() const {
+  assert(var != nullptr);
+  return var->nnuePointsCheckPlanes;
+}
+
+inline int Position::nnue_potion_zone_index_base() const {
+  assert(var != nullptr);
+  return var->nnuePotionZoneIndexBase;
+}
+
+inline int Position::nnue_potion_cooldown_index_base() const {
+  assert(var != nullptr);
+  return var->nnuePotionCooldownIndexBase;
 }
 
 inline bool Position::checking_permitted() const {
@@ -861,6 +937,23 @@ inline PieceSet Position::en_passant_types(Color c) const {
 inline bool Position::immobility_illegal() const {
   assert(var != nullptr);
   return var->immobilityIllegal;
+}
+
+inline bool Position::potions_enabled() const {
+  assert(var != nullptr);
+  return var->potions;
+}
+
+inline PieceType Position::potion_piece(Variant::PotionType type) const {
+  return var->potionPiece[type];
+}
+
+inline Bitboard Position::potion_zone(Color c, Variant::PotionType type) const {
+  return st->potionZones[c][type];
+}
+
+inline int Position::potion_cooldown(Color c, Variant::PotionType type) const {
+  return st->potionCooldown[c][type];
 }
 
 inline bool Position::gating() const {
@@ -1176,6 +1269,48 @@ inline MaterialCounting Position::material_counting() const {
 inline CountingRule Position::counting_rule() const {
   assert(var != nullptr);
   return var->countingRule;
+}
+
+inline bool Position::points_counting() const {
+  assert(var != nullptr);
+  return var->pointsCounting;
+}
+
+inline PointsRule Position::points_rule_captures() const {
+  assert(var != nullptr);
+  return var->pointsRuleCaptures;
+}
+
+inline int Position::points_goal() const {
+  assert(var != nullptr);
+  return var->pointsGoal;
+}
+
+inline int Position::points_count(Color c) const {
+  return st->pointsCount[c];
+}
+
+inline int Position::points_score(Color c) const {
+  return st->pointsCount[c];
+}
+
+inline int Position::points_score_clamped(Color c) const {
+  return std::max(0, std::min(points_score(c), POINTS_SCORE_MAX));
+}
+
+inline Value Position::points_goal_value() const {
+  assert(var != nullptr);
+  return var->pointsGoalValue;
+}
+
+inline Value Position::points_goal_simul_value_by_most_points() const {
+  assert(var != nullptr);
+  return var->pointsGoalSimulValueByMostPoints;
+}
+
+inline Value Position::points_goal_simul_value_by_mover() const {
+  assert(var != nullptr);
+  return var->pointsGoalSimulValueByMover;
 }
 
 inline bool Position::is_immediate_game_end() const {
@@ -1530,7 +1665,7 @@ inline const std::string Position::piece_to_partner() const {
   Piece piece = st->capturedpromoted ?
       (st->unpromotedCapturedPiece ? st->unpromotedCapturedPiece : make_piece(color, main_promotion_pawn_type(color))) :
       st->capturedPiece;
-  return std::string(1, piece_to_char()[piece]);
+  return piece_symbol(piece);
 }
 
 inline Thread* Position::this_thread() const {

@@ -43,6 +43,7 @@ namespace Stockfish {
 
 namespace Zobrist {
 
+  constexpr int MAX_ZOBRIST_POINTS = 512;
   Key psq[PIECE_NB][SQUARE_NB];
   Key enpassant[FILE_NB];
   Key castling[CASTLING_RIGHT_NB];
@@ -50,7 +51,10 @@ namespace Zobrist {
   Key inHand[PIECE_NB][SQUARE_NB];
   Key checks[COLOR_NB][CHECKS_NB];
   Key wall[SQUARE_NB];
+  Key potionZone[COLOR_NB][Variant::POTION_TYPE_NB][SQUARE_NB];
+  Key potionCooldown[COLOR_NB][Variant::POTION_TYPE_NB][POTION_COOLDOWN_BITS];
   Key endgame[EG_EVAL_NB];
+  Key points[COLOR_NB][MAX_ZOBRIST_POINTS];
 }
 
 
@@ -66,14 +70,20 @@ std::ostream& operator<<(std::ostream& os, const Position& pos) {
   for (Rank r = pos.max_rank(); r >= RANK_1; --r)
   {
       for (File f = FILE_A; f <= pos.max_file(); ++f)
-          if (pos.state()->wallSquares & make_square(f, r))
+      {
+          Square sq = make_square(f, r);
+          if (pos.state()->wallSquares & sq)
               os << " | *";
-          else if (pos.unpromoted_piece_on(make_square(f, r)))
-              os << " |+" << pos.piece_to_char()[pos.unpromoted_piece_on(make_square(f, r))];
-          else if (((pos.captures_to_hand() && !pos.drop_loop()) || pos.two_boards()) && pos.is_promoted(make_square(f, r)))
-              os << " |~" << pos.piece_to_char()[pos.piece_on(make_square(f, r))];
+          else if (pos.unpromoted_piece_on(sq))
+              os << " |+" << pos.piece_symbol(pos.unpromoted_piece_on(sq));
+          else if (((pos.captures_to_hand() && !pos.drop_loop()) || pos.two_boards()) && pos.is_promoted(sq))
+              os << " |~" << pos.piece_symbol(pos.piece_on(sq));
           else
-              os << " | " << pos.piece_to_char()[pos.piece_on(make_square(f, r))];
+          {
+              const std::string& symbol = pos.piece_symbol(pos.piece_on(sq));
+              os << " | " << (symbol.empty() ? " " : symbol);
+          }
+      }
 
 #ifdef LARGEBOARDS
       os << " |" << (pos.max_rank() == RANK_10 && CurrentProtocol != UCI_GENERAL ? r : 1 + r);
@@ -91,7 +101,8 @@ std::ostream& operator<<(std::ostream& os, const Position& pos) {
           {
               os << " [";
               for (PieceType pt = KING; pt >= PAWN; --pt)
-                  os << std::string(pos.count_in_hand(c, pt), pos.piece_to_char()[make_piece(c, pt)]);
+                  for (int i = 0; i < pos.count_in_hand(c, pt); ++i)
+                      os << pos.piece_symbol(make_piece(c, pt));
               os << "]";
           }
       }
@@ -157,6 +168,38 @@ Key cuckoo[8192];
 Move cuckooMove[8192];
 #endif
 
+inline void xor_points_bucket(Key& k, Color c, int points) {
+  if (points < 0)
+      return;
+  int idx = std::min(points, Stockfish::Zobrist::MAX_ZOBRIST_POINTS - 1);
+  k ^= Zobrist::points[c][idx];
+}
+
+inline int non_negative_points(int points) {
+  return std::max(points, 0);
+}
+
+inline void xor_potion_zone(Key& k, Color c, Variant::PotionType potion, Bitboard zone) {
+  while (zone)
+      k ^= Zobrist::potionZone[c][potion][pop_lsb(zone)];
+}
+
+inline void xor_potion_cooldown(Key& k, Color c, Variant::PotionType potion, int cooldown) {
+  unsigned value = static_cast<unsigned>(std::max(cooldown, 0));
+  for (int bit = 0; bit < POTION_COOLDOWN_BITS; ++bit)
+      if (value & (1u << bit))
+          k ^= Zobrist::potionCooldown[c][potion][bit];
+}
+
+inline std::array<int, 4> parse_potion_cooldowns(std::string content) {
+  std::array<int, 4> vals = {0, 0, 0, 0};
+  std::replace(content.begin(), content.end(), ',', ' ');
+  std::stringstream ss(content);
+  for (int i = 0; i < 4 && ss; ++i)
+      ss >> vals[i];
+  return vals;
+}
+
 
 /// Position::init() initializes at startup the various arrays used to compute hash keys
 
@@ -190,8 +233,20 @@ void Position::init() {
   for (Square s = SQ_A1; s <= SQ_MAX; ++s)
       Zobrist::wall[s] = rng.rand<Key>();
 
+  for (Color c : {WHITE, BLACK})
+      for (int pt = 0; pt < Variant::POTION_TYPE_NB; ++pt) {
+          for (Square s = SQ_A1; s <= SQ_MAX; ++s)
+              Zobrist::potionZone[c][pt][s] = rng.rand<Key>();
+          for (int bit = 0; bit < POTION_COOLDOWN_BITS; ++bit)
+              Zobrist::potionCooldown[c][pt][bit] = rng.rand<Key>();
+      }
+
   for (int i = NO_EG_EVAL; i < EG_EVAL_NB; ++i)
       Zobrist::endgame[i] = rng.rand<Key>();
+
+  for (Color c : {WHITE, BLACK})
+      for (int i = 0; i < Stockfish::Zobrist::MAX_ZOBRIST_POINTS; ++i)
+          Zobrist::points[c][i] = rng.rand<Key>();
 
   // Prepare the cuckoo tables
   std::memset(cuckoo, 0, sizeof(cuckoo));
@@ -271,8 +326,7 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
       incremented after Black's move.
 */
 
-  unsigned char col, row, token;
-  size_t idx;
+  unsigned char col, token;
   std::istringstream ss(fenStr);
 
   std::memset(this, 0, sizeof(Position));
@@ -287,6 +341,17 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
   Square sq = SQ_A1 + r * NORTH;
 
   // 1. Piece placement
+  auto read_symbol = [&](char first) {
+      std::string symbol(1, first);
+      if (Variant::is_piece_id_suffix(ss.peek()))
+      {
+          char suffix;
+          ss >> suffix;
+          symbol.push_back(suffix);
+      }
+      return symbol;
+  };
+
   while ((ss >> token) && !isspace(token))
   {
       if (isdigit(token))
@@ -324,19 +389,27 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
           ++sq;
       }
 
-      else if ((idx = piece_to_char().find(token)) != string::npos || (idx = piece_to_char_synonyms().find(token)) != string::npos)
+      else if (Variant::is_piece_id_start(token))
       {
+          std::string symbol = read_symbol(token);
+          Piece pc = piece_from_symbol(symbol);
+          if (pc == NO_PIECE)
+              continue;
           if (ss.peek() == '~')
               ss >> token;
-          put_piece(Piece(idx), sq, token == '~');
+          put_piece(pc, sq, token == '~');
           ++sq;
       }
 
       // Promoted shogi pieces
-      else if (token == '+' && (idx = piece_to_char().find(ss.peek())) != string::npos && promoted_piece_type(type_of(Piece(idx))))
+      else if (token == '+' && Variant::is_piece_id_start(ss.peek()))
       {
           ss >> token;
-          put_piece(make_piece(color_of(Piece(idx)), promoted_piece_type(type_of(Piece(idx)))), sq, true, Piece(idx));
+          std::string symbol = read_symbol(token);
+          Piece pc = piece_from_symbol(symbol);
+          if (pc == NO_PIECE || !promoted_piece_type(type_of(pc)))
+              continue;
+          put_piece(make_piece(color_of(pc), promoted_piece_type(type_of(pc))), sq, true, pc);
           ++sq;
       }
   }
@@ -346,8 +419,13 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
       {
           if (token == ']')
               continue;
-          else if ((idx = piece_to_char().find(token)) != string::npos)
-              add_to_hand(Piece(idx));
+          else if (Variant::is_piece_id_start(token))
+          {
+              std::string symbol = read_symbol(token);
+              Piece pc = piece_from_symbol(symbol);
+              if (pc != NO_PIECE)
+                  add_to_hand(pc);
+          }
       }
 
   // 2. Active color
@@ -440,10 +518,42 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
       // 4. En passant square.
       // Ignore if square is invalid or not on side to move relative rank 6.
       else
-          while (   ((ss >> col) && (col >= 'a' && col <= 'a' + max_file()))
-                 && ((ss >> row) && (row >= '1' && row <= '1' + max_rank())))
+      {
+          std::string epSpec;
+          ss >> epSpec;
+          if (epSpec == "-")
+              epSpec.clear();
+
+          for (std::size_t i = 0; i < epSpec.size();)
           {
-              Square epSquare = make_square(File(col - 'a'), Rank(row - '1'));
+              col = epSpec[i++];
+              if (col < 'a' || col > 'a' + max_file())
+                  break;
+
+              std::string rankDigits;
+              while (i < epSpec.size() && std::isdigit(static_cast<unsigned char>(epSpec[i])))
+                  rankDigits.push_back(epSpec[i++]);
+              if (rankDigits.empty())
+                  break;
+
+              int rankNumber = 0;
+              bool rankOverflow = false;
+              for (char d : rankDigits)
+              {
+                  int digit = d - '0';
+                  if (rankNumber > (std::numeric_limits<int>::max() - digit) / 10)
+                  {
+                      rankOverflow = true;
+                      break;
+                  }
+                  rankNumber = rankNumber * 10 + digit;
+              }
+              if (rankOverflow)
+                  continue;
+              if (rankNumber < 1 || rankNumber > max_rank() + 1)
+                  continue;
+
+              Square epSquare = make_square(File(col - 'a'), Rank(rankNumber - 1));
 #ifdef LARGEBOARDS
               // Consider different rank numbering in CECP
               if (max_rank() == RANK_10 && CurrentProtocol == XBOARD)
@@ -467,6 +577,7 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
                           && !((pieces(WHITE) | pieces(BLACK)) & (epSquare | (epSquare + pawn_push(sideToMove)))))))
                   st->epSquares |= epSquare;
           }
+      }
   }
 
   // Check counter for nCheck
@@ -506,10 +617,14 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
               while (isdigit(ss.peek()) && ss >> token)
                   handCount = 10 * handCount + (token - '0');
           }
-          else if ((idx = piece_to_char().find(token)) != string::npos)
+          else if (Variant::is_piece_id_start(token))
           {
+              std::string symbol = read_symbol(token);
+              Piece pc = piece_from_symbol(symbol);
+              if (pc == NO_PIECE)
+                  continue;
               for (int i = 0; i < handCount; i++)
-                  add_to_hand(Piece(idx));
+                  add_to_hand(pc);
               handCount = 1;
           }
       }
@@ -542,6 +657,82 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
           st->checksRemaining[WHITE] = CheckCount(std::max(3 - (token - '0'), 0));
           ss >> token >> token;
           st->checksRemaining[BLACK] = CheckCount(std::max(3 - (token - '0'), 0));
+      }
+  }
+
+  st->pointsCount[WHITE] = 0;
+  st->pointsCount[BLACK] = 0;
+  if (var->pointsCounting)
+  {
+      ss >> std::ws;
+      if (ss.peek() == '{')
+      {
+          char openBrace = 0, closeBrace = 0;
+          int whitePoints = 0, blackPoints = 0;
+          if (ss >> openBrace >> whitePoints >> blackPoints >> closeBrace
+              && openBrace == '{' && closeBrace == '}')
+          {
+              st->pointsCount[WHITE] = non_negative_points(whitePoints);
+              st->pointsCount[BLACK] = non_negative_points(blackPoints);
+          }
+      }
+  }
+
+  if (potions_enabled())
+  {
+      ss >> std::ws;
+      std::string potionSpec;
+      if (ss.peek() == 'f' || ss.peek() == 'j' || ss.peek() == '-')
+          ss >> potionSpec;
+
+      if (!potionSpec.empty() && potionSpec != "-")
+      {
+          Color zoneColor = ~sideToMove;
+          if (potionSpec.size() > 2 && potionSpec[1] == ':')
+          {
+              Square zoneCenter = SQ_NONE;
+              std::string sqText = potionSpec.substr(2);
+              if (sqText.size() >= 2)
+              {
+                  char fileCh = sqText[0];
+                  int rankVal = 0;
+                  bool okRank = true;
+                  for (size_t i = 1; i < sqText.size(); ++i)
+                  {
+                      if (!isdigit(static_cast<unsigned char>(sqText[i])))
+                      {
+                          okRank = false;
+                          break;
+                      }
+                      rankVal = rankVal * 10 + (sqText[i] - '0');
+                  }
+                  if (okRank && fileCh >= 'a' && fileCh <= 'a' + max_file()
+                      && rankVal >= 1 && rankVal <= max_rank() + 1)
+                      zoneCenter = make_square(File(fileCh - 'a'), Rank(rankVal - 1));
+              }
+              if (is_ok(zoneCenter))
+              {
+                  if (potionSpec[0] == 'f')
+                      st->potionZones[zoneColor][Variant::POTION_FREEZE] = square_bb(zoneCenter);
+                  else if (potionSpec[0] == 'j')
+                      st->potionZones[zoneColor][Variant::POTION_JUMP] = square_bb(zoneCenter);
+              }
+          }
+      }
+
+      ss >> std::ws;
+      if (ss.peek() == '<')
+      {
+          char open = 0;
+          ss >> open;
+          std::string cooldownSpec;
+          std::getline(ss, cooldownSpec, '>');
+          auto vals = parse_potion_cooldowns(cooldownSpec);
+          int maxCooldown = (1 << POTION_COOLDOWN_BITS) - 1;
+          st->potionCooldown[WHITE][Variant::POTION_FREEZE] = std::min(vals[0], maxCooldown);
+          st->potionCooldown[WHITE][Variant::POTION_JUMP]   = std::min(vals[1], maxCooldown);
+          st->potionCooldown[BLACK][Variant::POTION_FREEZE] = std::min(vals[2], maxCooldown);
+          st->potionCooldown[BLACK][Variant::POTION_JUMP]   = std::min(vals[3], maxCooldown);
       }
   }
 
@@ -673,6 +864,21 @@ void Position::set_state(StateInfo* si) const {
   if (check_counting())
       for (Color c : {WHITE, BLACK})
           si->key ^= Zobrist::checks[c][si->checksRemaining[c]];
+
+  if (var->pointsCounting)
+      for (Color c : {WHITE, BLACK})
+          xor_points_bucket(si->key, c, si->pointsCount[c]);
+
+  if (potions_enabled())
+      for (Color c : {WHITE, BLACK})
+          for (int pt = 0; pt < Variant::POTION_TYPE_NB; ++pt)
+          {
+              Variant::PotionType potion = static_cast<Variant::PotionType>(pt);
+              if (potion_piece(potion) == NO_PIECE_TYPE)
+                  continue;
+              xor_potion_zone(si->key, c, potion, si->potionZones[c][pt]);
+              xor_potion_cooldown(si->key, c, potion, si->potionCooldown[c][pt]);
+          }
 }
 
 
@@ -722,10 +928,10 @@ string Position::fen(bool sfen, bool showPromoted, int countStarted, std::string
                   ss << "*";
               else if (unpromoted_piece_on(make_square(f, r)))
                   // Promoted shogi pieces, e.g., +r for dragon
-                  ss << "+" << piece_to_char()[unpromoted_piece_on(make_square(f, r))];
+                  ss << "+" << piece_symbol(unpromoted_piece_on(make_square(f, r)));
               else
               {
-                  ss << piece_to_char()[piece_on(make_square(f, r))];
+                  ss << piece_symbol(piece_on(make_square(f, r)));
 
                   // Set promoted pieces
                   if (((captures_to_hand() && !drop_loop()) || two_boards() ||  showPromoted) && is_promoted(make_square(f, r)))
@@ -748,7 +954,7 @@ string Position::fen(bool sfen, bool showPromoted, int countStarted, std::string
               {
                   if (pieceCountInHand[c][pt] > 1)
                       ss << pieceCountInHand[c][pt];
-                  ss << piece_to_char()[make_piece(c, pt)];
+                  ss << piece_symbol(make_piece(c, pt));
               }
       if (count_in_hand(ALL_PIECES) == 0)
           ss << '-';
@@ -767,7 +973,8 @@ string Position::fen(bool sfen, bool showPromoted, int countStarted, std::string
               for (PieceType pt = KING; pt >= PAWN; --pt)
               {
                   assert(pieceCountInHand[c][pt] >= 0);
-                  ss << std::string(pieceCountInHand[c][pt], piece_to_char()[make_piece(c, pt)]);
+                  for (int i = 0; i < pieceCountInHand[c][pt]; ++i)
+                      ss << piece_symbol(make_piece(c, pt));
               }
       ss << ']';
   }
@@ -839,6 +1046,32 @@ string Position::fen(bool sfen, bool showPromoted, int countStarted, std::string
       ss << st->rule50;
 
   ss << " " << 1 + (gamePly - (sideToMove == BLACK)) / 2;
+
+  if (variant()->pointsCounting)
+      ss << " {" << st->pointsCount[WHITE] << " " << st->pointsCount[BLACK] << "}";
+
+  if (potions_enabled())
+  {
+      bool wroteZone = false;
+      Color zoneColor = ~sideToMove;
+      if (st->potionZones[zoneColor][Variant::POTION_FREEZE])
+      {
+          ss << " f:" << UCI::square(*this, lsb(st->potionZones[zoneColor][Variant::POTION_FREEZE]));
+          wroteZone = true;
+      }
+      else if (st->potionZones[zoneColor][Variant::POTION_JUMP])
+      {
+          ss << " j:" << UCI::square(*this, lsb(st->potionZones[zoneColor][Variant::POTION_JUMP]));
+          wroteZone = true;
+      }
+      if (!wroteZone)
+          ss << " -";
+      ss << " <"
+         << st->potionCooldown[WHITE][Variant::POTION_FREEZE] << " "
+         << st->potionCooldown[WHITE][Variant::POTION_JUMP] << " "
+         << st->potionCooldown[BLACK][Variant::POTION_FREEZE] << " "
+         << st->potionCooldown[BLACK][Variant::POTION_JUMP] << ">";
+  }
 
   return ss.str();
 }
@@ -1667,6 +1900,29 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
       else if (Eval::NNUE::useNNUE != Eval::NNUE::UseNNUEMode::False)
           dp.handPiece[1] = NO_PIECE;
 
+      if (points_counting())
+      {
+          PointsRule pointsOwner = points_rule_captures();
+          int points = var->piecePoints[type_of(captured)];
+
+          switch (pointsOwner) {
+              case POINTS_US:
+                  st->pointsCount[us] += points;
+                  break;
+              case POINTS_THEM:
+                  st->pointsCount[them] += points;
+                  break;
+              case POINTS_OWNER:
+                  st->pointsCount[color_of(captured)] += points;
+                  break;
+              case POINTS_NON_OWNER:
+                  st->pointsCount[~color_of(captured)] += points;
+                  break;
+              case POINTS_NONE:
+                  break;
+          }
+      }
+
       // Update material hash key and prefetch access to materialTable
       k ^= Zobrist::psq[captured][capsq];
       st->materialKey ^= Zobrist::psq[captured][pieceCount[captured]];
@@ -1766,6 +2022,12 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
   // Move the piece. The tricky Chess960 castling is handled earlier
   if (type_of(m) == DROP)
   {
+      if (var->payPointsToDrop)
+      {
+          st->pointsCount[us] -= var->piecePoints[type_of(pc)];
+          st->pointsCount[us] = non_negative_points(st->pointsCount[us]);
+      }
+
       if (Eval::NNUE::useNNUE != Eval::NNUE::UseNNUEMode::False)
       {
           // Add drop piece
@@ -2050,6 +2312,17 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
               }
           }
 
+          if (points_counting()) {
+              int pts = var->piecePoints[type_of(bpc)];
+              switch (points_rule_captures()) {
+                  case POINTS_US:        st->pointsCount[us]  += pts; break;
+                  case POINTS_THEM:      st->pointsCount[~us] += pts; break;
+                  case POINTS_OWNER:     st->pointsCount[bc]  += pts; break;
+                  case POINTS_NON_OWNER: st->pointsCount[~bc] += pts; break;
+                  default: break;
+              }
+          }
+
           // Update material hash key
           k ^= Zobrist::psq[bpc][bsq];
           st->materialKey ^= Zobrist::psq[bpc][pieceCount[bpc]];
@@ -2090,6 +2363,15 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
       st->wallSquares |= gating_square(m);
       byTypeBB[ALL_PIECES] |= gating_square(m);
       k ^= Zobrist::wall[gating_square(m)];
+  }
+
+  if (var->pointsCounting) {
+      for (Color c : {WHITE, BLACK}) {
+          if (st->pointsCount[c] == st->previous->pointsCount[c])
+              continue;
+          xor_points_bucket(k, c, st->previous->pointsCount[c]);
+          xor_points_bucket(k, c, st->pointsCount[c]);
+      }
   }
 
   // Update the key with the final value
@@ -2372,6 +2654,7 @@ Key Position::key_after(Move m) const {
   Piece pc = moved_piece(m);
   Piece captured = piece_on(to);
   Key k = st->key ^ Zobrist::side;
+  int nextPoints[COLOR_NB] = {st->pointsCount[WHITE], st->pointsCount[BLACK]};
 
   if (captured)
   {
@@ -2382,15 +2665,37 @@ Key Position::key_after(Move m) const {
           k ^= Zobrist::inHand[removeFromHand][pieceCountInHand[color_of(removeFromHand)][type_of(removeFromHand)] + 1]
               ^ Zobrist::inHand[removeFromHand][pieceCountInHand[color_of(removeFromHand)][type_of(removeFromHand)]];
       }
+      if (points_counting())
+      {
+          int pts = variant()->piecePoints[type_of(captured)];
+          switch (points_rule_captures())
+          {
+              case POINTS_US:        nextPoints[sideToMove] += pts; break;
+              case POINTS_THEM:      nextPoints[~sideToMove] += pts; break;
+              case POINTS_OWNER:     nextPoints[color_of(captured)] += pts; break;
+              case POINTS_NON_OWNER: nextPoints[~color_of(captured)] += pts; break;
+              case POINTS_NONE:      break;
+          }
+      }
   }
   if (type_of(m) == DROP)
   {
       Piece pc_hand = make_piece(sideToMove, in_hand_piece_type(m));
-      return k ^ Zobrist::psq[pc][to] ^ Zobrist::inHand[pc_hand][pieceCountInHand[color_of(pc_hand)][type_of(pc_hand)]]
-            ^ Zobrist::inHand[pc_hand][pieceCountInHand[color_of(pc_hand)][type_of(pc_hand)] - 1];
+      k ^= Zobrist::psq[pc][to] ^ Zobrist::inHand[pc_hand][pieceCountInHand[color_of(pc_hand)][type_of(pc_hand)]]
+         ^ Zobrist::inHand[pc_hand][pieceCountInHand[color_of(pc_hand)][type_of(pc_hand)] - 1];
+      if (var->payPointsToDrop)
+          nextPoints[sideToMove] = non_negative_points(nextPoints[sideToMove] - variant()->piecePoints[type_of(pc)]);
+      for (Color c : {WHITE, BLACK})
+          if (nextPoints[c] != st->pointsCount[c])
+              xor_points_bucket(k, c, st->pointsCount[c]), xor_points_bucket(k, c, nextPoints[c]);
+      return k;
   }
 
-  return k ^ Zobrist::psq[pc][to] ^ Zobrist::psq[pc][from];
+  k ^= Zobrist::psq[pc][to] ^ Zobrist::psq[pc][from];
+  for (Color c : {WHITE, BLACK})
+      if (nextPoints[c] != st->pointsCount[c])
+          xor_points_bucket(k, c, st->pointsCount[c]), xor_points_bucket(k, c, nextPoints[c]);
+  return k;
 }
 
 
@@ -2845,6 +3150,41 @@ bool Position::is_immediate_game_end(Value& result, int ply) const {
   {
       result = mated_in(ply);
       return true;
+  }
+
+  if (points_counting() && points_goal() > 0)
+  {
+      if (st->pointsCount[~sideToMove] >= points_goal() && st->pointsCount[sideToMove] >= points_goal())
+      {
+          if (st->pointsCount[~sideToMove] != st->pointsCount[sideToMove])
+          {
+              if (var->pointsGoalSimulValueByMostPoints != VALUE_DRAW)
+              {
+                  result = convert_mate_value(
+                    st->pointsCount[~sideToMove] > st->pointsCount[sideToMove]
+                      ? -var->pointsGoalSimulValueByMostPoints
+                      :  var->pointsGoalSimulValueByMostPoints, ply);
+                  return true;
+              }
+          }
+          if (var->pointsGoalSimulValueByMover != VALUE_NONE)
+          {
+              result = convert_mate_value(-var->pointsGoalSimulValueByMover, ply);
+              return true;
+          }
+          result = convert_mate_value(VALUE_DRAW, ply);
+          return true;
+      }
+      if (st->pointsCount[~sideToMove] >= points_goal())
+      {
+          result = convert_mate_value(-var->pointsGoalValue, ply);
+          return true;
+      }
+      if (st->pointsCount[sideToMove] >= points_goal())
+      {
+          result = convert_mate_value(var->pointsGoalValue, ply);
+          return true;
+      }
   }
 
   //Calculate eligible pieces for connection once.

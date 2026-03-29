@@ -311,8 +311,21 @@ void init(const Variant* v) {
       {
           if (token == '/')
               --rc;
-          else if (token == v->pieceToChar[PAWN] || token == v->pieceToChar[SHOGI_PAWN])
+          else if (Stockfish::Variant::is_piece_id_start(token))
+          {
+              std::string symbol(1, token);
+              if (Stockfish::Variant::is_piece_id_suffix(ss.peek()))
+              {
+                  char suffix;
+                  ss >> suffix;
+                  symbol.push_back(suffix);
+              }
+              if (symbol == v->piece_symbol(make_piece(WHITE, PAWN))
+                  || symbol == v->piece_symbol(make_piece(WHITE, SHOGI_PAWN))
+                  || symbol == v->piece_symbol(make_piece(BLACK, PAWN))
+                  || symbol == v->piece_symbol(make_piece(BLACK, SHOGI_PAWN)))
               pawnRank = rc;
+          }
       }
 
       for (Square s = SQ_A1; s <= SQ_MAX; ++s)
