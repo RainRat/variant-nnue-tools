@@ -2601,6 +2601,20 @@ void VariantMap::parse_istream(std::istream& file) {
             }
         }
 
+        // Accept the tools-era spelling `variantTemplate = <name>` as an
+        // inheritance directive when the section header has no `:<name>`.
+        // Keep the established header form authoritative for normal configs.
+        if (variant_template.empty())
+        {
+            auto templateIt = attribs.find("variantTemplate");
+            if (templateIt != attribs.end())
+            {
+                std::string candidate = trim_ascii_spaces(templateIt->second);
+                if (variants.has(candidate))
+                    variant_template = candidate;
+            }
+        }
+
         // Create variant
         if (variants.has(variant))
         {
@@ -2669,7 +2683,7 @@ void VariantMap::parse_istream(std::istream& file) {
             Variant* v = nullptr;
             if (!variant_template.empty())
             {
-                Variant* inherited = (new Variant(*variants.get(variant_template)))->conclude();
+                Variant* inherited = (new Variant(*variants.get(variant_template)))->init();
                 v = VariantParser<DoCheck>(attribs).parse(inherited);
                 if (!v)
                     delete inherited;

@@ -30,9 +30,9 @@ printf 'setoption name UCI_Variant value chess\ntrainer_config chess %s\nquit\n'
   | "$engine" > "$tmpdir/chess.out" 2>&1
 
 grep -q '^#define MOVE_SQUARE_BITS 6$' "$tmpdir/chess/variant.h"
-grep -q '^#define NNUE_KING 0$' "$tmpdir/chess/variant.h"
+grep -q '^#define NNUE_KING 1$' "$tmpdir/chess/variant.h"
 grep -q '^MOVE_SQUARE_BITS = 6$' "$tmpdir/chess/variant.py"
-grep -q '^NNUE_KING = False$' "$tmpdir/chess/variant.py"
+grep -q '^NNUE_KING = True$' "$tmpdir/chess/variant.py"
 
 printf 'setoption name VariantPath value %s\nsetoption name UCI_Variant value mini-vlb\ntrainer_config mini-vlb %s\nquit\n' \
   "$tmpdir/twochar.ini" "$tmpdir/twochar" | "$engine" > "$tmpdir/twochar.out" 2>&1
