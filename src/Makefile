@@ -49,10 +49,9 @@ endif
 SRCS = benchmark.cpp bitbase.cpp bitboard.cpp endgame.cpp evaluate.cpp main.cpp \
 	material.cpp misc.cpp movegen.cpp movepick.cpp pawns.cpp position.cpp psqt.cpp \
 	search.cpp thread.cpp timeman.cpp tt.cpp uci.cpp ucioption.cpp tune.cpp syzygy/tbprobe.cpp \
+	nnue/evaluate_nnue.cpp \
 	partner.cpp parser.cpp piece.cpp variant.cpp xboard.cpp \
 	nnue/features/half_ka_v2_variants.cpp \
-	nnue/evaluate_nnue.cpp \
-	nnue/features/half_ka_v2.cpp \
 	tools/validate_training_data.cpp \
 	tools/sfen_packer.cpp \
 	tools/sfen_stream.cpp \
@@ -83,7 +82,7 @@ VPATH = syzygy:nnue:nnue/features:eval:extra:tools
 #                     --- ...etc...        --- see compiler documentation for supported sanitizers
 # optimize = yes/no   --- (-O3/-fast etc.) --- Enable/Disable optimizations
 # arch = (name)       --- (-arch)          --- Target architecture
-# bits = 64/32        --- -DIS_64BIT       --- 64-/32-bit operating system
+# bits = 64           --- -DIS_64BIT       --- 64-bit operating system
 # prefetch = yes/no   --- -DUSE_PREFETCH   --- Use prefetch asm-instruction
 # popcnt = yes/no     --- -DUSE_POPCNT     --- Use popcnt asm-instruction
 # pext = yes/no       --- -DUSE_PEXT       --- Use pext x86_64 asm-instruction
@@ -108,6 +107,7 @@ VPATH = syzygy:nnue:nnue/features:eval:extra:tools
 
 ### 2.1. General and architecture defaults
 largeboards = no
+verylargeboards = no
 all = no
 precomputedmagics = yes
 nnue = no
@@ -118,12 +118,11 @@ ifeq ($(ARCH),)
    help_skip_sanity = yes
 endif
 # explicitly check for the list of supported architectures (as listed with make help),
-# the user can override with `make ARCH=x86-32-vnni256 SUPPORTED_ARCH=true`
+# the user can override with `make ARCH=x86-64-vnni256 SUPPORTED_ARCH=true`
 ifeq ($(ARCH), $(filter $(ARCH), \
                  x86-64-vnni512 x86-64-vnni256 x86-64-avx512 x86-64-bmi2 x86-64-avx2 \
                  x86-64-sse41-popcnt x86-64-modern x86-64-ssse3 x86-64-sse3-popcnt \
-                 x86-64 x86-32-sse41-popcnt x86-32-sse2 x86-32 ppc-64 ppc-32 e2k \
-                 armv7 armv7-neon armv8 apple-silicon general-64 general-32))
+                 x86-64 ppc-64 e2k armv8 apple-silicon general-64))
    SUPPORTED_ARCH=true
 else
    SUPPORTED_ARCH=false
@@ -152,18 +151,11 @@ STRIP = strip
 
 ifeq ($(findstring x86,$(ARCH)),x86)
 
-# x86-32/64
+# x86-64
 
-ifeq ($(findstring x86-32,$(ARCH)),x86-32)
-	arch = i386
-	bits = 32
-	sse = yes
-	mmx = yes
-else
-	arch = x86_64
-	sse = yes
-	sse2 = yes
-endif
+arch = x86_64
+sse = yes
+sse2 = yes
 
 ifeq ($(findstring -sse,$(ARCH)),-sse)
 	sse = yes
@@ -260,36 +252,12 @@ ifeq ($(sse),yes)
 	prefetch = yes
 endif
 
-# 64-bit pext is not available on x86-32
-ifeq ($(bits),32)
-	pext = no
-endif
-
 else
 
 # all other architectures
 
-ifeq ($(ARCH),general-32)
-	arch = any
-	bits = 32
-endif
-
 ifeq ($(ARCH),general-64)
 	arch = any
-endif
-
-ifeq ($(ARCH),armv7)
-	arch = armv7
-	prefetch = yes
-	bits = 32
-endif
-
-ifeq ($(ARCH),armv7-neon)
-	arch = armv7
-	prefetch = yes
-	popcnt = yes
-	neon = yes
-	bits = 32
 endif
 
 ifeq ($(ARCH),armv8)
@@ -304,11 +272,6 @@ ifeq ($(ARCH),apple-silicon)
 	prefetch = yes
 	popcnt = yes
 	neon = yes
-endif
-
-ifeq ($(ARCH),ppc-32)
-	arch = ppc
-	bits = 32
 endif
 
 ifeq ($(ARCH),ppc-64)
@@ -350,6 +313,11 @@ CXXFLAGS += -Wno-profile-instr-out-of-date
 
 # Compile version with support for large board variants
 # Use precomputed magics by default if pext is not available
+ifneq ($(verylargeboards),no)
+	largeboards = yes
+	precomputedmagics = no
+	CXXFLAGS += -DVERY_LARGE_BOARDS
+endif
 ifneq ($(largeboards),no)
 	CXXFLAGS += -DLARGEBOARDS
 	ifeq ($(precomputedmagics),yes)
@@ -380,12 +348,12 @@ endif
 ifeq ($(COMP),gcc)
 	comp=gcc
 	CXX=g++
-	CXXFLAGS += -Wextra -Wshadow
+	CXXFLAGS += -Wextra -Wshadow -fno-ipa-cp-clone
 	ifeq ($(largeboards),no)
 		CXXFLAGS += -pedantic
 	endif
 
-	ifeq ($(arch),$(filter $(arch),armv7 armv8))
+	ifeq ($(arch),armv8)
 		ifeq ($(OS),Android)
 			CXXFLAGS += -m$(bits)
 			LDFLAGS += -m$(bits)
@@ -393,10 +361,6 @@ ifeq ($(COMP),gcc)
 	else
 		CXXFLAGS += -m$(bits)
 		LDFLAGS += -m$(bits)
-	endif
-
-	ifeq ($(arch),$(filter $(arch),armv7))
-		LDFLAGS += -latomic
 	endif
 
 	ifneq ($(KERNEL),Darwin)
@@ -408,18 +372,10 @@ ifeq ($(COMP),mingw)
 	comp=mingw
 
 	ifeq ($(KERNEL),Linux)
-		ifeq ($(bits),64)
-			ifeq ($(shell which x86_64-w64-mingw32-c++-posix),)
-				CXX=x86_64-w64-mingw32-c++
-			else
-				CXX=x86_64-w64-mingw32-c++-posix
-			endif
+		ifeq ($(shell which x86_64-w64-mingw32-c++-posix),)
+			CXX=x86_64-w64-mingw32-c++
 		else
-			ifeq ($(shell which i686-w64-mingw32-c++-posix),)
-				CXX=i686-w64-mingw32-c++
-			else
-				CXX=i686-w64-mingw32-c++-posix
-			endif
+			CXX=x86_64-w64-mingw32-c++-posix
 		endif
 	else
 		CXX=g++
@@ -448,7 +404,7 @@ ifeq ($(COMP),clang)
 	endif
 	endif
 
-	ifeq ($(arch),$(filter $(arch),armv7 armv8))
+	ifeq ($(arch),armv8)
 		ifeq ($(OS),Android)
 			CXXFLAGS += -m$(bits)
 			LDFLAGS += -m$(bits)
@@ -471,11 +427,6 @@ endif
 ifeq ($(COMP),ndk)
 	CXXFLAGS += -stdlib=libc++ -fPIE
 	comp=clang
-	ifeq ($(arch),armv7)
-		CXX=armv7a-linux-androideabi16-clang++
-		CXXFLAGS += -mthumb -march=armv7-a -mfloat-abi=softfp -mfpu=neon
-		STRIP=arm-linux-androideabi-strip
-	endif
 	ifeq ($(arch),armv8)
 		CXX=aarch64-linux-android21-clang++
 		STRIP=aarch64-linux-android-strip
@@ -548,7 +499,7 @@ ifeq ($(optimize),yes)
 
 	ifeq ($(comp),gcc)
 		ifeq ($(OS), Android)
-			CXXFLAGS += -fno-gcse -mthumb -march=armv7-a -mfloat-abi=softfp
+			CXXFLAGS += -fno-gcse
 		endif
 	endif
 
@@ -582,7 +533,7 @@ endif
 
 ### 3.6 popcnt
 ifeq ($(popcnt),yes)
-	ifeq ($(arch),$(filter $(arch),ppc64 armv7 armv8 arm64))
+	ifeq ($(arch),$(filter $(arch),ppc64 armv8 arm64))
 		CXXFLAGS += -DUSE_POPCNT
 	else ifeq ($(comp),icc)
 		CXXFLAGS += -msse3 -DUSE_POPCNT
@@ -750,18 +701,11 @@ help:
 	@echo "x86-64-ssse3            > x86 64-bit with ssse3 support"
 	@echo "x86-64-sse3-popcnt      > x86 64-bit with sse3 and popcnt support"
 	@echo "x86-64                  > x86 64-bit generic (with sse2 support)"
-	@echo "x86-32-sse41-popcnt     > x86 32-bit with sse41 and popcnt support"
-	@echo "x86-32-sse2             > x86 32-bit with sse2 support"
-	@echo "x86-32                  > x86 32-bit generic (with mmx and sse support)"
 	@echo "ppc-64                  > PPC 64-bit"
-	@echo "ppc-32                  > PPC 32-bit"
-	@echo "armv7                   > ARMv7 32-bit"
-	@echo "armv7-neon              > ARMv7 32-bit with popcnt and neon"
 	@echo "armv8                   > ARMv8 64-bit with popcnt and neon"
 	@echo "e2k                     > Elbrus 2000"
 	@echo "apple-silicon           > Apple silicon ARM64"
 	@echo "general-64              > unspecified 64-bit"
-	@echo "general-32              > unspecified 32-bit"
 	@echo ""
 	@echo "Supported compilers:"
 	@echo ""
@@ -774,7 +718,6 @@ help:
 	@echo "Simple examples. If you don't know what to do, you likely want to run: "
 	@echo ""
 	@echo "make -j build ARCH=x86-64  (A portable, slow compile for 64-bit systems)"
-	@echo "make -j build ARCH=x86-32  (A portable, slow compile for 32-bit systems)"
 	@echo ""
 	@echo "Advanced examples, for experienced users looking for performance: "
 	@echo ""
@@ -799,13 +742,14 @@ else
 	@echo ""
 	@echo "make build ARCH=x86-64 COMP=gcc largeboards=yes"
 	@echo ""
-	@echo "Larger PackedSFEN buffer for training data: "
+	@echo "Version for very large boards (up to 16x16): "
 	@echo ""
-	@echo "make build ARCH=x86-64 COMP=gcc largedata=yes"
+	@echo "make build ARCH=x86-64 COMP=gcc verylargeboards=yes"
 	@echo ""
 	@echo "Include all variants (adds Game of the Amazons): "
 	@echo ""
 	@echo "make build ARCH=x86-64 largeboards=yes all=yes"
+	@echo "make build ARCH=x86-64 verylargeboards=yes all=yes"
 	@echo ""
 endif
 
@@ -928,7 +872,7 @@ config-sanity: $(load_net)
 	@echo ""
 	@echo "Fairy-Stockfish specific:"
 	@echo "largeboards: '$(largeboards)'"
-	@echo "largedata: '$(largedata)'"
+	@echo "verylargeboards: '$(verylargeboards)'"
 	@echo "all: '$(all)'"
 	@echo "precomputedmagics: '$(precomputedmagics)'"
 	@echo "nnue: '$(nnue)'"
@@ -943,10 +887,9 @@ config-sanity: $(load_net)
 	@test "$(debug)" = "yes" || test "$(debug)" = "no"
 	@test "$(optimize)" = "yes" || test "$(optimize)" = "no"
 	@test "$(SUPPORTED_ARCH)" = "true"
-	@test "$(arch)" = "any" || test "$(arch)" = "x86_64" || test "$(arch)" = "i386" || \
-	 test "$(arch)" = "ppc64" || test "$(arch)" = "ppc" || test "$(arch)" = "e2k" || \
-	 test "$(arch)" = "armv7" || test "$(arch)" = "armv8" || test "$(arch)" = "arm64"
-	@test "$(bits)" = "32" || test "$(bits)" = "64"
+	@test "$(arch)" = "any" || test "$(arch)" = "x86_64" || test "$(arch)" = "ppc64" || \
+	 test "$(arch)" = "e2k" || test "$(arch)" = "armv8" || test "$(arch)" = "arm64"
+	@test "$(bits)" = "64"
 	@test "$(prefetch)" = "yes" || test "$(prefetch)" = "no"
 	@test "$(popcnt)" = "yes" || test "$(popcnt)" = "no"
 	@test "$(pext)" = "yes" || test "$(pext)" = "no"
@@ -961,7 +904,7 @@ config-sanity: $(load_net)
 	@test "$(vnni512)" = "yes" || test "$(vnni512)" = "no"
 	@test "$(neon)" = "yes" || test "$(neon)" = "no"
 	@test "$(comp)" = "gcc" || test "$(comp)" = "icc" || test "$(comp)" = "mingw" || test "$(comp)" = "clang" \
-	|| test "$(comp)" = "armv7a-linux-androideabi16-clang"  || test "$(comp)" = "aarch64-linux-android21-clang"
+	|| test "$(comp)" = "aarch64-linux-android21-clang"
 
 $(EXE): $(OBJS)
 	+$(CXX) -o $@ $(OBJS) $(LDFLAGS)

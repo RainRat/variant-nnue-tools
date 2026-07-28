@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -75,6 +76,7 @@ public:
   void start_searching();
   void wait_for_search_finished();
   size_t id() const { return idx; }
+  bool is_searching() const { return searching; }
 
   void wait_for_worker_finished();
 
@@ -109,6 +111,25 @@ public:
   bool UseRule50;
   Depth ProbeDepth;
   Score trend;
+
+  ExtMove* acquire_buffer() {
+    if (availableBuffers.empty()) {
+      bufferPool.push_back(std::make_unique<ExtMove[]>(MOVEGEN_OVERFLOW_CAPACITY));
+      return bufferPool.back().get();
+    }
+    ExtMove* b = availableBuffers.back();
+    availableBuffers.pop_back();
+    return b;
+  }
+
+  void release_buffer(ExtMove* b) {
+    if (b)
+      availableBuffers.push_back(b);
+  }
+
+private:
+  std::vector<std::unique_ptr<ExtMove[]>> bufferPool;
+  std::vector<ExtMove*> availableBuffers;
 };
 
 
@@ -136,6 +157,7 @@ struct MainThread : public Thread {
 /// is done through this class.
 
 struct ThreadPool : public std::vector<Thread*> {
+  ~ThreadPool() { set(0); }
 
   // Each thread gets its own copy of the `worker` function object.
   // This means that each worker thread will have exclusive access
@@ -196,18 +218,31 @@ struct ThreadPool : public std::vector<Thread*> {
   void clear();
   void set(size_t);
 
-  MainThread* main()        const { return static_cast<MainThread*>(front()); }
+  MainThread* main() const {
+    assert(!empty());
+    return static_cast<MainThread*>(front());
+  }
   uint64_t nodes_searched() const { return accumulate(&Thread::nodes); }
   uint64_t tb_hits()        const { return accumulate(&Thread::tbHits); }
   Thread* get_best_thread() const;
   void start_searching();
   void wait_for_search_finished() const;
   void wait_for_workers_finished() const;
+  bool is_searching() const {
+    for (Thread* th : *this)
+        if (th->is_searching())
+            return true;
+    return false;
+  }
 
   std::atomic_bool stop, increaseDepth;
   std::atomic_bool abort, sit;
 
   StateListPtr setupStates;
+  const StateListPtr* setupStateOwner = nullptr;
+  const std::deque<StateInfo>* setupStateSource = nullptr;
+  size_t setupStateSize = 0;
+  Key setupStateKey = 0;
 
 private:
   uint64_t accumulate(std::atomic<uint64_t> Thread::* member) const {

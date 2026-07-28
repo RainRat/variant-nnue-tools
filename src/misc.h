@@ -22,10 +22,12 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
-#include <functional>
+#include <cstdlib>
+#include <iostream>
 #include <mutex>
 #include <ostream>
 #include <string>
+#include <utility>
 #include <vector>
 #include <iostream>
 
@@ -76,6 +78,7 @@ inline TimePoint now() {
 
 template<class Entry, int Size>
 struct HashTable {
+  static_assert(Size > 0 && (Size & (Size - 1)) == 0, "HashTable size must be a power of two");
   Entry* operator[](Key key) { return &table[(uint32_t)key & (Size - 1)]; }
 
 private:
@@ -83,11 +86,41 @@ private:
 };
 
 
-enum SyncCout { IO_LOCK, IO_UNLOCK };
-std::ostream& operator<<(std::ostream&, SyncCout);
+class SyncCout {
+public:
+  SyncCout();
+  ~SyncCout();
 
-#define sync_cout std::cout << IO_LOCK
-#define sync_endl std::endl << IO_UNLOCK
+  SyncCout(const SyncCout&) = delete;
+  SyncCout& operator=(const SyncCout&) = delete;
+
+  template <typename T>
+  SyncCout& operator<<(const T& value) {
+    std::cout << value;
+    return *this;
+  }
+
+  SyncCout& operator<<(std::ostream& (*manip)(std::ostream&)) {
+    manip(std::cout);
+    return *this;
+  }
+
+  SyncCout& operator<<(std::ios& (*manip)(std::ios&)) {
+    manip(std::cout);
+    return *this;
+  }
+
+  SyncCout& operator<<(std::ios_base& (*manip)(std::ios_base&)) {
+    manip(std::cout);
+    return *this;
+  }
+
+private:
+  static std::mutex& mutex();
+};
+
+#define sync_cout SyncCout()
+#define sync_endl std::endl
 
 
 // align_ptr_up() : get the first aligned element of an array.
@@ -111,16 +144,28 @@ static inline const bool IsLittleEndian = (Le.c[0] == 4);
 template <typename T>
 class ValueListInserter {
 public:
-  ValueListInserter(T* v, std::size_t& s) :
+  ValueListInserter(T* v, std::size_t& s, std::size_t c) :
     values(v),
-    size(&s)
+    size(&s),
+    capacity(c)
   {
   }
 
-  void push_back(const T& value) { values[(*size)++] = value; }
+  void push_back(const T& value) {
+    if (*size >= capacity)
+      overflow();
+
+    values[(*size)++] = value;
+  }
 private:
+  [[noreturn]] static void overflow() {
+    assert(false && "ValueList capacity exceeded");
+    std::abort();
+  }
+
   T* values;
   std::size_t* size;
+  std::size_t capacity;
 };
 
 template <typename T, std::size_t MaxSize>
@@ -128,25 +173,50 @@ class ValueList {
 
 public:
   std::size_t size() const { return size_; }
-  void resize(std::size_t newSize) { size_ = newSize; }
-  void push_back(const T& value) { values_[size_++] = value; }
+  static constexpr std::size_t capacity() { return MaxSize; }
+  void resize(std::size_t newSize) {
+    if (newSize > MaxSize)
+      overflow();
+
+    size_ = newSize;
+  }
+  void push_back(const T& value) {
+    if (size_ >= MaxSize)
+      overflow();
+
+    values_[size_++] = value;
+  }
   T& operator[](std::size_t index) { return values_[index]; }
   T* begin() { return values_; }
   T* end() { return values_ + size_; }
   const T& operator[](std::size_t index) const { return values_[index]; }
   const T* begin() const { return values_; }
   const T* end() const { return values_ + size_; }
-  operator ValueListInserter<T>() { return ValueListInserter(values_, size_); }
+  operator ValueListInserter<T>() { return ValueListInserter<T>(values_, size_, MaxSize); }
 
   void swap(ValueList& other) {
-    const std::size_t maxSize = std::max(size_, other.size_);
-    for (std::size_t i = 0; i < maxSize; ++i) {
+    const std::size_t minSize = std::min(size_, other.size_);
+    for (std::size_t i = 0; i < minSize; ++i) {
       std::swap(values_[i], other.values_[i]);
     }
+
+    if (size_ < other.size_) {
+      for (std::size_t i = minSize; i < other.size_; ++i)
+        values_[i] = std::move(other.values_[i]);
+    } else {
+      for (std::size_t i = minSize; i < size_; ++i)
+        other.values_[i] = std::move(values_[i]);
+    }
+
     std::swap(size_, other.size_);
   }
 
 private:
+  [[noreturn]] static void overflow() {
+    assert(false && "ValueList capacity exceeded");
+    std::abort();
+  }
+
   T values_[MaxSize];
   std::size_t size_ = 0;
 };
@@ -406,7 +476,7 @@ class PRNG {
 
 public:
   PRNG() { set_seed_from_time(); }
-  PRNG(uint64_t seed) : s(seed) { assert(seed); }
+  PRNG(uint64_t seed) : s(seed ? seed : 0x9E3779B97F4A7C15ULL) {}
   PRNG(const std::string& seed) { set_seed(seed); }
 
   template<typename T> T rand() { return T(rand64()); }
@@ -414,45 +484,25 @@ public:
   /// Special generator used to fast init magic numbers.
   /// Output values only have 1/8th of their bits set on average.
   template<typename T> T sparse_rand()
-  { return T(rand64() & rand64() & rand64()); }
-  // Returns a random number from 0 to n-1. (Not uniform distribution, but this is enough in reality)
-  uint64_t rand(uint64_t n) { return rand<uint64_t>() % n; }
-
-  // Return the random seed used internally.
-  uint64_t get_seed() const { return s; }
-
-  void set_seed(uint64_t seed) { s = seed; }
-
-  uint64_t next_random_seed()
   {
-    uint64_t seed = 0;
-    for(int i = 0; i < 64; ++i)
-    {
-      const auto off = rand64() % 64;
-      seed |= (rand64() & (uint64_t(1) << off)) >> off;
-      seed <<= 1;
-    }
-    return seed;
+    uint64_t a = rand64();
+    uint64_t b = rand64();
+    uint64_t c = rand64();
+    return T(a & b & c);
   }
 
-  void set_seed_from_time()
-  {
+  uint64_t rand(uint64_t n) { return rand<uint64_t>() % n; }
+  uint64_t get_seed() const { return s; }
+  void set_seed(uint64_t seed) { s = seed ? seed : 0x9E3779B97F4A7C15ULL; }
+  uint64_t next_random_seed() { return rand<uint64_t>(); }
+  void set_seed_from_time() {
       set_seed(std::chrono::system_clock::now().time_since_epoch().count());
   }
-
-  void set_seed(const std::string& str)
-  {
-    if (str.empty())
-    {
-      set_seed_from_time();
-    }
-    else if (std::all_of(str.begin(), str.end(), [](char c) { return std::isdigit(c);} )) {
-      set_seed(std::stoull(str));
-    }
-    else
-    {
-      set_seed(string_hash(str));
-    }
+  void set_seed(const std::string& seed) {
+      if (seed.empty()) set_seed_from_time();
+      else if (std::all_of(seed.begin(), seed.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); }))
+          set_seed(std::stoull(seed));
+      else set_seed(string_hash(seed));
   }
 };
 

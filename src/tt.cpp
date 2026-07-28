@@ -37,22 +37,21 @@ bool TranspositionTable::enable_transposition_table = true;
 
 void TTEntry::save(Key k, Value v, bool pv, Bound b, Depth d, Move m, Value ev) {
 
-  if (!TranspositionTable::enable_transposition_table) {
-      return;
-  }
+  assert(m == MOVE_NONE || is_ok(m));
+
   // Preserve any existing move for the same position
-  if (m || (uint16_t)k != key16)
-      move32 = (uint32_t)m;
+  if (m || TTKey(k) != keyTag)
+      storedMove = TTMove(m);
 
   // Overwrite less valuable entries (cheapest checks first)
   if (b == BOUND_EXACT
-      || (uint16_t)k != key16
-      || d - DEPTH_OFFSET > depth8 - 4)
+      || TTKey(k) != keyTag
+      || d - DEPTH_OFFSET > int(depth8) - 4)
   {
       assert(d > DEPTH_OFFSET);
       assert(d < 256 + DEPTH_OFFSET);
 
-      key16     = (uint16_t)k;
+      keyTag    = TTKey(k);
       depth8    = (uint8_t)(d - DEPTH_OFFSET);
       genBound8 = (uint8_t)(TT.generation8 | uint8_t(pv) << 2 | b);
       value16   = (int16_t)v;
@@ -70,10 +69,19 @@ void TranspositionTable::resize(size_t mbSize) {
   Threads.main()->wait_for_search_finished();
 
   aligned_large_pages_free(table);
+  table = nullptr;
 
-  clusterCount = mbSize * 1024 * 1024 / sizeof(Cluster);
+  clusterCount = std::max<size_t>(1, mbSize * 1024 * 1024 / sizeof(Cluster));
 
   table = static_cast<Cluster*>(aligned_large_pages_alloc(clusterCount * sizeof(Cluster)));
+  if (!table && mbSize > 1)
+  {
+      std::cerr << "Failed to allocate " << mbSize
+                << "MB for transposition table; falling back to 1MB." << std::endl;
+      clusterCount = std::max<size_t>(1, 1024 * 1024 / sizeof(Cluster));
+      table = static_cast<Cluster*>(aligned_large_pages_alloc(clusterCount * sizeof(Cluster)));
+  }
+
   if (!table)
   {
       std::cerr << "Failed to allocate " << mbSize
@@ -91,19 +99,20 @@ void TranspositionTable::resize(size_t mbSize) {
 void TranspositionTable::clear() {
 
   std::vector<std::thread> threads;
+  const size_t threadCount = size_t(Options["Threads"]);
 
-  for (size_t idx = 0; idx < Options["Threads"]; ++idx)
+  for (size_t idx = 0; idx < threadCount; ++idx)
   {
-      threads.emplace_back([this, idx]() {
+      threads.emplace_back([this, idx, threadCount]() {
 
           // Thread binding gives faster search on systems with a first-touch policy
-          if (Options["Threads"] > 8)
+          if (threadCount > 8)
               WinProcGroup::bindThisThread(idx);
 
           // Each thread will zero its part of the hash table
-          const size_t stride = size_t(clusterCount / Options["Threads"]),
+          const size_t stride = size_t(clusterCount / threadCount),
                        start  = size_t(stride * idx),
-                       len    = idx != Options["Threads"] - 1 ?
+                       len    = idx != threadCount - 1 ?
                                 stride : clusterCount - start;
 
           std::memset(&table[start], 0, len * sizeof(Cluster));
@@ -130,10 +139,10 @@ TTEntry* TranspositionTable::probe(const Key key, bool& found) const {
   }
 
   TTEntry* const tte = first_entry(key);
-  const uint16_t key16 = (uint16_t)key;  // Use the low 16 bits as key inside the cluster
+  const TTKey keyTag = TTKey(key);  // Use a compact per-entry key inside the cluster
 
   for (int i = 0; i < ClusterSize; ++i)
-      if (tte[i].key16 == key16 || !tte[i].depth8)
+      if (tte[i].keyTag == keyTag || !tte[i].depth8)
       {
           tte[i].genBound8 = uint8_t(generation8 | (tte[i].genBound8 & (GENERATION_DELTA - 1))); // Refresh
 
@@ -162,11 +171,12 @@ TTEntry* TranspositionTable::probe(const Key key, bool& found) const {
 int TranspositionTable::hashfull() const {
 
   int cnt = 0;
-  for (int i = 0; i < 1000; ++i)
+  const size_t sampleCount = std::min(clusterCount, size_t(1000));
+  for (size_t i = 0; i < sampleCount; ++i)
       for (int j = 0; j < ClusterSize; ++j)
           cnt += table[i].entry[j].depth8 && (table[i].entry[j].genBound8 & GENERATION_MASK) == generation8;
 
-  return cnt / ClusterSize;
+  return sampleCount ? int((cnt * 1000) / (ClusterSize * sampleCount)) : 0;
 }
 
 } // namespace Stockfish

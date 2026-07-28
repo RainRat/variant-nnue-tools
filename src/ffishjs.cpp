@@ -18,10 +18,12 @@
 
 #include <emscripten.h>
 #include <emscripten/bind.h>
-#include <vector>
-#include <string>
+#include <atomic>
+#include <iostream>
+#include <mutex>
 #include <sstream>
-#include<iostream>
+#include <string>
+#include <vector>
 
 #include "misc.h"
 #include "types.h"
@@ -42,6 +44,22 @@ using namespace emscripten;
 
 using namespace Stockfish;
 
+void initialize_stockfish();
+
+namespace {
+std::atomic<bool> logReadGamePgnMoves{false};
+std::once_flag stockfish_init_flag;
+std::mutex variant_state_mutex;
+
+void ensure_stockfish_initialized() {
+  std::call_once(stockfish_init_flag, []() { initialize_stockfish(); });
+}
+
+[[noreturn]] void throw_js_error(const std::string& message) {
+  val::global("Error").new_(message).throw_();
+}
+}
+
 void initialize_stockfish() {
   pieceMap.init();
   variants.init();
@@ -61,18 +79,16 @@ inline void save_pop_back(std::string& s) {
 
 const Variant* get_variant(const std::string& uciVariant) {
   if (uciVariant.size() == 0 || uciVariant == "Standard" || uciVariant == "standard")
-    return variants.find("chess")->second;
-  return variants.find(uciVariant)->second;
+    return variants.get("chess");
+  if (const Variant* v = variants.get(uciVariant))
+    return v;
+  throw_js_error("No such variant '" + uciVariant + "'");
 }
 
 template <bool isUCI>
-inline bool is_move_none(Move move, const std::string& strMove, const Position& pos) {
-  if (move == MOVE_NONE) {
-    std::cerr << "The given ";
-    isUCI ? std::cerr << "uciMove" : std::cerr << "sanMove";
-    std::cerr << " '" << strMove << "' for position '" << pos.fen() << "' is invalid." << std::endl;
+inline bool is_move_none(Move move, const std::string&, const Position&) {
+  if (move == MOVE_NONE)
     return true;
-  }
   return false;
 }
 
@@ -82,12 +98,12 @@ private:
   const Variant* v;
   StateListPtr states;
   Position pos;
-  Thread* thread;
   std::vector<Move> moveStack;
+  std::vector<std::string> moveStackUCI;
   bool is960;
 
 public:
-  static bool sfInitialized;
+  static std::atomic<bool> sfInitialized;
 
   Board():
     Board("chess", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" , false) {
@@ -134,6 +150,7 @@ public:
     if (is_move_none<true>(move, uciMove, pos))
       return false;
     do_move(move);
+    moveStackUCI.emplace_back(uciMove);
     return true;
   }
 
@@ -153,14 +170,21 @@ public:
     }
     if (is_move_none<false>(foundMove, sanMove, pos))
       return false;
+    std::string uciMove = UCI::move(this->pos, foundMove);
     do_move(foundMove);
+    moveStackUCI.emplace_back(uciMove);
     return true;
   }
 
-  void pop() {
+  bool pop() {
+    if (moveStack.empty() || states->size() <= 1)
+      return false;
+
     pos.undo_move(this->moveStack.back());
     moveStack.pop_back();
+    moveStackUCI.pop_back();
     states->pop_back();
+    return true;
   }
 
   void reset() {
@@ -186,7 +210,8 @@ public:
   void set_fen(std::string fen) {
     resetStates();
     moveStack.clear();
-    pos.set(v, fen, is960, &states->back(), thread);
+    moveStackUCI.clear();
+    pos.set(v, fen, is960, &states->back(), Threads.empty() ? nullptr : Threads.main());
   }
 
   // note: const identifier for pos not possible due to SAN::move_to_san()
@@ -198,7 +223,7 @@ public:
     const Move move = UCI::to_move(this->pos, uciMove);
     if (is_move_none<true>(move, uciMove, pos))
       return "";
-    return SAN::move_to_san(this->pos, UCI::to_move(this->pos, uciMove), notation);
+    return SAN::move_to_san(this->pos, move, notation);
   }
 
   std::string variation_san(std::string uciMoves) {
@@ -211,17 +236,30 @@ public:
 
   std::string variation_san(std::string uciMoves, Notation notation, bool moveNumbers) {
     std::stringstream ss(uciMoves);
-    StateListPtr tempStates;
     std::vector<Move> moves;
     std::string variationSan = "";
     std::string uciMove;
     bool first = true;
+    std::size_t pushedStates = 0;
+
+    auto rollback = [&]() {
+      for (auto rIt = std::rbegin(moves); rIt != std::rend(moves); ++rIt)
+        pos.undo_move(*rIt);
+      for (std::size_t i = 0; i < pushedStates; ++i)
+        states->pop_back();
+      pushedStates = 0;
+    };
 
     while (std::getline(ss, uciMove, ' ')) {
+      if (uciMove.empty())
+        continue;
       const Move move = UCI::to_move(this->pos, uciMove);
       if (is_move_none<true>(move, uciMove, pos))
+      {
+        rollback();
         return "";
-      moves.emplace_back(UCI::to_move(this->pos, uciMove));
+      }
+      moves.emplace_back(move);
       if (first) {
         first = false;
         if (moveNumbers) {
@@ -244,12 +282,11 @@ public:
       }
       states->emplace_back();
       pos.do_move(moves.back(), states->back());
+      ++pushedStates;
     }
 
     // recover initial state
-    for(auto rIt = std::rbegin(moves); rIt != std::rend(moves); ++rIt) {
-      pos.undo_move(*rIt);
-    }
+    rollback();
 
     return variationSan;
   }
@@ -276,6 +313,8 @@ public:
   }
 
   bool is_insufficient_material() const {
+    if (pos.count<KING>() == 0 && pos.king_type() == NO_PIECE_TYPE && !pos.pseudo_royal_types() && !pos.anti_royal_types())
+      return false;
     return Stockfish::has_insufficient_material(WHITE, pos) && Stockfish::has_insufficient_material(BLACK, pos);
   }
 
@@ -306,15 +345,19 @@ public:
     }
     if (!gameEnd && MoveList<LEGAL>(pos).size() == 0) {
       gameEnd = true;
-      result = pos.checkers() ? pos.checkmate_value() : pos.stalemate_value();
+      result = pos.evasion_checkers() ? pos.checkmate_value() : pos.stalemate_value();
     }
     if (!gameEnd && claim_draw)
       gameEnd = pos.is_optional_game_end(result);
 
     if (!gameEnd)
       return "*";
-    if (result == 0)
-      return "1/2-1/2";
+    if (result == 0) {
+      if (pos.material_counting())
+        result = pos.material_counting_result();
+      if (result == 0)
+        return "1/2-1/2";
+    }
     if (pos.side_to_move() == BLACK)
       result = -result;
     if (result > 0)
@@ -335,8 +378,24 @@ public:
     return squares;
   }
 
+  std::string evasion_checked_pieces() const {
+    Bitboard checked = Stockfish::evasion_checked(pos);
+    std::string squares;
+    while (checked) {
+      Square sr = pop_lsb(checked);
+      squares += UCI::square(pos, sr);
+      squares += DELIM;
+    }
+    save_pop_back(squares);
+    return squares;
+  }
+
   bool is_check() const {
     return Stockfish::checked(pos);
+  }
+
+  bool is_real_check() const {
+    return pos.evasion_checkers();
   }
 
   bool is_bikjang() const {
@@ -344,13 +403,16 @@ public:
   }
 
   bool is_capture(std::string uciMove) const {
-    return pos.capture(UCI::to_move(pos, uciMove));
+    Move move = UCI::to_move(pos, uciMove);
+    if (move == MOVE_NONE)
+      throw_js_error("Invalid move '" + uciMove + "'");
+    return pos.capture(move);
   }
 
   std::string move_stack() const {
     std::string moves;
-    for(auto it = std::begin(moveStack); it != std::end(moveStack); ++it) {
-      moves += UCI::move(pos, *it);
+    for(auto it = std::begin(moveStackUCI); it != std::end(moveStackUCI); ++it) {
+      moves += *it;
       moves += DELIM;
     }
     save_pop_back(moves);
@@ -361,7 +423,10 @@ public:
     std::stringstream ss(uciMoves);
     std::string uciMove;
     while (std::getline(ss, uciMove, ' ')) {
-      push(uciMove);
+      if (uciMove.empty())
+        continue;
+      if (!push(uciMove))
+        break;
     }
   }
 
@@ -372,8 +437,12 @@ public:
   void push_san_moves(std::string sanMoves, Notation notation) {
     std::stringstream ss(sanMoves);
     std::string sanMove;
-    while (std::getline(ss, sanMove, ' '))
-      push_san(sanMove, notation);
+    while (std::getline(ss, sanMove, ' ')) {
+      if (sanMove.empty())
+        continue;
+      if (!push_san(sanMove, notation))
+        break;
+    }
   }
 
   std::string pocket(bool color) {
@@ -381,7 +450,8 @@ public:
     std::string pocket;
     for (PieceType pt = KING; pt >= PAWN; --pt) {
       for (int i = 0; i < pos.count_in_hand(c, pt); ++i) {
-        pocket += pos.piece_symbol(make_piece(c, pt));
+        // only create BLACK pieces in order to convert to lower case
+        pocket += pos.piece_to_char()[make_piece(BLACK, pt)];
       }
     }
     return pocket;
@@ -415,13 +485,16 @@ public:
   }
 
   std::string variant() {
+    std::lock_guard<std::mutex> lock(variant_state_mutex);
     // Iterate through the variants map
     for (auto it = variants.begin(); it != variants.end(); ++it)
       if (it->second == v)
         return it->first;
-
-    std::cerr << "Current variant is not registered." << std::endl;
     return "unknown";
+  }
+
+  bool potions_enabled() const {
+    return v->potions;
   }
 
 private:
@@ -436,21 +509,20 @@ private:
   }
 
   void init(std::string uciVariant, std::string fen, bool is960) {
-    if (!Board::sfInitialized) {
-      initialize_stockfish();
-      Board::sfInitialized = true;
-    }
+    ensure_stockfish_initialized();
+    Board::sfInitialized.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(variant_state_mutex);
     v = get_variant(uciVariant);
     UCI::init_variant(v);
     this->resetStates();
     if (fen == "")
       fen = v->startFen;
-    this->pos.set(this->v, fen, is960, &this->states->back(), this->thread);
+    this->pos.set(this->v, fen, is960, &this->states->back(), Threads.empty() ? nullptr : Threads.main());
     this->is960 = is960;
   }
 };
 
-bool Board::sfInitialized = false;
+std::atomic<bool> Board::sfInitialized{false};
 
 namespace ffish {
   // returns the version of the Fairy-Stockfish binary
@@ -460,11 +532,18 @@ namespace ffish {
 
   template <typename T>
   void set_option(std::string name, T value) {
+    ensure_stockfish_initialized();
+    std::lock_guard<std::mutex> lock(variant_state_mutex);
+    if (!Options.count(name))
+      throw_js_error("No such option '" + name + "'");
     Options[name] = value;
-    Board::sfInitialized = false;
+    Board::sfInitialized.store(false, std::memory_order_relaxed);
   }
 
   std::string available_variants() {
+    ensure_stockfish_initialized();
+    Board::sfInitialized.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(variant_state_mutex);
     std::string availableVariants;
     for (std::string variant : variants.get_keys()) {
       availableVariants += variant;
@@ -476,26 +555,46 @@ namespace ffish {
 
   void load_variant_config(std::string variantInitContent) {
     std::stringstream ss(variantInitContent);
-    if (!Board::sfInitialized)
-      initialize_stockfish();
+    ensure_stockfish_initialized();
+    std::lock_guard<std::mutex> lock(variant_state_mutex);
     variants.parse_istream<false>(ss);
     Options["UCI_Variant"].set_combo(variants.get_keys());
-    Board::sfInitialized = true;
+    Board::sfInitialized.store(true, std::memory_order_relaxed);
   }
 
   bool captures_to_hand(std::string uciVariant) {
+    ensure_stockfish_initialized();
+    std::lock_guard<std::mutex> lock(variant_state_mutex);
     const Variant* v = get_variant(uciVariant);
-    return v->capturesToHand;
+    return v->captureType != MOVE_OUT;
   }
 
   std::string starting_fen(std::string uciVariant) {
+    ensure_stockfish_initialized();
+    std::lock_guard<std::mutex> lock(variant_state_mutex);
     const Variant* v = get_variant(uciVariant);
     return v->startFen;
   }
 
   int validate_fen(std::string fen, std::string uciVariant, bool chess960) {
+    ensure_stockfish_initialized();
+    std::lock_guard<std::mutex> lock(variant_state_mutex);
     const Variant* v = get_variant(uciVariant);
     return FEN::validate_fen(fen, v, chess960);
+  }
+
+  int validate_position(std::string fen, std::string uciVariant, std::string uciMoves, bool chess960) {
+    ensure_stockfish_initialized();
+    std::lock_guard<std::mutex> lock(variant_state_mutex);
+    const Variant* v = get_variant(uciVariant);
+    std::stringstream ss(uciMoves);
+    std::string token;
+    std::vector<std::string> moves;
+    while (std::getline(ss, token, ' ')) {
+      if (!token.empty())
+        moves.push_back(token);
+    }
+    return FEN::validate_position(fen, v, moves, chess960);
   }
 
   int validate_fen(std::string fen, std::string uciVariant) {
@@ -545,12 +644,14 @@ public:
 
 bool skip_comment(const std::string& pgn, size_t& curIdx, size_t& lineEnd) {
   curIdx = pgn.find('}', curIdx);
-  if (curIdx == std::string::npos) {
-    std::cerr << "Missing '}' for move comment while reading pgn." << std::endl;
+  if (curIdx == std::string::npos)
     return false;
-  }
   if (curIdx > lineEnd)
+  {
     lineEnd = pgn.find('\n', curIdx);
+    if (lineEnd == std::string::npos)
+      lineEnd = pgn.size();
+  }
   return true;
 }
 
@@ -560,28 +661,42 @@ Game read_game_pgn(std::string pgn) {
   bool headersParsed = false;
 
   while(true) {
+    if (lineStart >= pgn.size())
+      return game;
+
     size_t lineEnd = pgn.find('\n', lineStart);
 
     if (lineEnd == std::string::npos)
       lineEnd = pgn.size();
 
-    if (!headersParsed && pgn[lineStart] == '[') {
+    size_t currentLineStart = lineStart;
+    while (currentLineStart < lineEnd && std::isspace(static_cast<unsigned char>(pgn[currentLineStart])))
+      ++currentLineStart;
+
+    if (currentLineStart < lineEnd && !headersParsed && pgn[currentLineStart] == '[') {
       // parse header
       // look for item
-      size_t headerKeyStart = lineStart+1;
-      size_t headerKeyEnd = pgn.find(' ', lineStart);
-      size_t headerItemStart = pgn.find('"', headerKeyEnd)+1;
-      size_t headerItemEnd = pgn.find('"', headerItemStart);
+      size_t firstQuote = pgn.find('"', currentLineStart);
+      if (firstQuote != std::string::npos && firstQuote < lineEnd) {
+        size_t headerKeyStart = currentLineStart + 1;
+        size_t headerKeyEnd = pgn.find(' ', headerKeyStart);
+        if (headerKeyEnd == std::string::npos || headerKeyEnd > firstQuote)
+          headerKeyEnd = firstQuote;
 
-      // put item into list
-      game.header[pgn.substr(headerKeyStart, headerKeyEnd-headerKeyStart)] = pgn.substr(headerItemStart, headerItemEnd-headerItemStart);
+        std::string key = pgn.substr(headerKeyStart, headerKeyEnd - headerKeyStart);
+        size_t headerItemStart = firstQuote + 1;
+        size_t headerItemEnd = pgn.find('"', headerItemStart);
+        if (headerItemEnd != std::string::npos && headerItemEnd < lineEnd) {
+          game.header[key] = pgn.substr(headerItemStart, headerItemEnd - headerItemStart);
+        }
+      }
     }
     else {
       if (!headersParsed) {
         headersParsed = true;
         auto it = game.header.find("Variant");
         if (it != game.header.end()) {
-          game.is960 = it->second.find("960", it->second.size() - 3) != std::string::npos;
+          game.is960 = it->second.size() >= 3 && it->second.find("960", it->second.size() - 3) != std::string::npos;
           if (game.is960) {
             game.variant = it->second.substr(0, it->second.size() - 3);
           } else {
@@ -601,7 +716,13 @@ Game read_game_pgn(std::string pgn) {
 
       // game line
       size_t curIdx = lineStart;
-      while (curIdx <= lineEnd) {
+      while (curIdx < lineEnd) {
+        while (curIdx < lineEnd && std::isspace(static_cast<unsigned char>(pgn[curIdx])))
+          ++curIdx;
+
+        if (curIdx >= lineEnd || curIdx >= pgn.size())
+          break;
+
         if (pgn[curIdx] == '*')
           return game;
 
@@ -609,6 +730,7 @@ Game read_game_pgn(std::string pgn) {
           if (!skip_comment(pgn, curIdx, lineEnd))
             return game;
           ++curIdx;
+          continue;
         }
 
         // Movetext RAV (Recursive Annotation Variation)
@@ -618,6 +740,9 @@ Game read_game_pgn(std::string pgn) {
           ++curIdx;
         }
         while (openedRAV != 0) {
+          if (curIdx >= pgn.size())
+            return game;
+
           switch (pgn[curIdx]) {
             case '(':
               ++openedRAV;
@@ -628,30 +753,44 @@ Game read_game_pgn(std::string pgn) {
             case '{':
               if (!skip_comment(pgn, curIdx, lineEnd))
                 return game;
+              break;
             default: ;  // pass
           }
           ++curIdx;
-          if (curIdx > lineEnd)
+          if (curIdx >= lineEnd)
+          {
             lineEnd = pgn.find('\n', curIdx);
+            if (lineEnd == std::string::npos)
+              lineEnd = pgn.size();
+          }
         }
+
+        if (curIdx >= lineEnd || curIdx >= pgn.size())
+          break;
 
         if (pgn[curIdx] == '$') {
           // we are at a glyph
-          curIdx = pgn.find(' ', curIdx);
+          size_t nextSpace = pgn.find(' ', curIdx);
+          if (nextSpace == std::string::npos || nextSpace >= lineEnd)
+            break;
+          curIdx = nextSpace;
+          continue;
         }
 
         if (pgn[curIdx] >= '0' && pgn[curIdx] <= '9') {
           // we are at a move number -> look for next point
-          curIdx = pgn.find('.', curIdx);
-          if (curIdx == std::string::npos)
+          size_t dotPos = pgn.find('.', curIdx);
+          if (dotPos == std::string::npos || dotPos >= lineEnd)
             break;
-          ++curIdx;
+          curIdx = dotPos + 1;
           // increment if we're at a space
-          while (curIdx < pgn.size() && pgn[curIdx] == ' ')
+          while (curIdx < lineEnd && pgn[curIdx] == ' ')
             ++curIdx;
           // increment if we're at a point
-          while (curIdx < pgn.size() && pgn[curIdx] == '.')
+          while (curIdx < lineEnd && pgn[curIdx] == '.')
             ++curIdx;
+          if (curIdx >= lineEnd)
+            break;
         }
         // extract sanMove
         size_t sanMoveEnd = std::min(pgn.find(' ', curIdx), lineEnd);
@@ -662,10 +801,15 @@ Game read_game_pgn(std::string pgn) {
           size_t annotationChar2 = sanMove.find('!');
           if (annotationChar1 != std::string::npos || annotationChar2 != std::string::npos)
             sanMove = sanMove.substr(0, std::min(annotationChar1, annotationChar2));
-          std::cout << sanMove << " ";
-          game.board->push_san(sanMove);
+          if (logReadGamePgnMoves.load())
+            std::cerr << sanMove << " ";
+          if (!game.board->push_san(sanMove))
+          {
+            game.parsedGame = false;
+            return game;
+          }
         }
-        curIdx = sanMoveEnd+1;
+        curIdx = sanMoveEnd;
       }
     }
     lineStart = lineEnd+1;
@@ -713,7 +857,9 @@ EMSCRIPTEN_BINDINGS(ffish_js) {
     .function("result", select_overload<std::string() const>(&Board::result))
     .function("result", select_overload<std::string(bool) const>(&Board::result))
     .function("checkedPieces", &Board::checked_pieces)
+    .function("evasionCheckedPieces", &Board::evasion_checked_pieces)
     .function("isCheck", &Board::is_check)
+    .function("isRealCheck", &Board::is_real_check)
     .function("isBikjang", &Board::is_bikjang)
     .function("isCapture", &Board::is_capture)
     .function("moveStack", &Board::move_stack)
@@ -723,7 +869,8 @@ EMSCRIPTEN_BINDINGS(ffish_js) {
     .function("pocket", &Board::pocket)
     .function("toString", &Board::to_string)
     .function("toVerboseString", &Board::to_verbose_string)
-    .function("variant", &Board::variant);
+    .function("variant", &Board::variant)
+    .function("potionsEnabled", &Board::potions_enabled);
   class_<Game>("Game")
     .function("headerKeys", &Game::header_keys)
     .function("headers", &Game::headers)
@@ -753,7 +900,12 @@ EMSCRIPTEN_BINDINGS(ffish_js) {
   function("setOption", &ffish::set_option<std::string>);
   function("setOptionInt", &ffish::set_option<int>);
   function("setOptionBool", &ffish::set_option<bool>);
-  function("readGamePGN", &read_game_pgn);
+  function("setReadGamePGNLoggingEnabled", optional_override([](bool enabled) {
+    logReadGamePgnMoves.store(enabled);
+  }));
+  function("readGamePGN", optional_override([](std::string pgn) {
+    return new Game(read_game_pgn(std::move(pgn)));
+  }), allow_raw_pointers());
   function("variants", &ffish::available_variants);
   function("loadVariantConfig", &ffish::load_variant_config);
   function("capturesToHand", &ffish::captures_to_hand);
@@ -761,6 +913,7 @@ EMSCRIPTEN_BINDINGS(ffish_js) {
   function("validateFen", select_overload<int(std::string)>(&ffish::validate_fen));
   function("validateFen", select_overload<int(std::string, std::string)>(&ffish::validate_fen));
   function("validateFen", select_overload<int(std::string, std::string, bool)>(&ffish::validate_fen));
+  function("validatePosition", select_overload<int(std::string, std::string, std::string, bool)>(&ffish::validate_position));
   // TODO: enable to string conversion method
   // .class_function("getStringFromInstance", &Board::get_string_from_instance);
 }

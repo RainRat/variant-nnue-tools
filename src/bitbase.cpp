@@ -32,6 +32,7 @@ namespace {
   constexpr unsigned MAX_INDEX = 2*24*64*64; // stm * psq * wksq * bksq = 196608
 
   std::bitset<MAX_INDEX> KPKBitbase;
+  bool KPKBitbaseInitialized = false;
 
   // A KPK bitbase index is an integer in [0, IndexMax] range
   //
@@ -70,6 +71,22 @@ namespace {
 
 bool Bitbases::probe(Square wksq, Square wpsq, Square bksq, Color stm) {
 
+#ifdef LARGEBOARDS
+  return false;
+#endif
+
+  assert(KPKBitbaseInitialized);
+
+  if (!KPKBitbaseInitialized)
+      return false;
+
+  if (file_of(wpsq) > FILE_D)
+  {
+      wpsq = flip_file(wpsq, FILE_H);
+      wksq = flip_file(wksq, FILE_H);
+      bksq = flip_file(bksq, FILE_H);
+  }
+
   assert(file_of(wpsq) <= FILE_D);
 
   return KPKBitbase[index(stm, bksq, wksq, wpsq)];
@@ -100,6 +117,8 @@ void Bitbases::init() {
   for (idx = 0; idx < MAX_INDEX; ++idx)
       if (db[idx] == WIN)
           KPKBitbase.set(idx);
+
+  KPKBitbaseInitialized = true;
 }
 
 namespace {

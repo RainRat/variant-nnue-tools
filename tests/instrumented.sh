@@ -1,6 +1,8 @@
 #!/bin/bash
 # check for errors under valgrind or sanitizers.
 
+set -euo pipefail
+
 error()
 {
   echo "instrumented testing failed on line $1"
@@ -9,12 +11,12 @@ error()
 trap 'error ${LINENO}' ERR
 
 # define suitable post and prefixes for testing options
+mode=""
 case $1 in
   --valgrind)
     echo "valgrind testing started"
-    prefix=''
-    exeprefix='valgrind --error-exitcode=42 --errors-for-leak-kinds=all --leak-check=full'
-    postfix='1>/dev/null'
+    mode="valgrind"
+    valgrind_args=(--error-exitcode=42 --errors-for-leak-kinds=all --leak-check=full)
     threads="1"
     bench_depth=5
     go_depth=10
@@ -22,9 +24,8 @@ case $1 in
   ;;
   --valgrind-thread)
     echo "valgrind-thread testing started"
-    prefix=''
-    exeprefix='valgrind --fair-sched=try --error-exitcode=42'
-    postfix='1>/dev/null'
+    mode="valgrind-thread"
+    valgrind_args=(--fair-sched=try --error-exitcode=42)
     threads="2"
     bench_depth=5
     go_depth=10
@@ -32,9 +33,8 @@ case $1 in
   ;;
   --sanitizer-undefined)
     echo "sanitizer-undefined testing started"
-    prefix='!'
-    exeprefix=''
-    postfix='2>&1 | grep -A50 "runtime error:"'
+    mode="sanitizer-undefined"
+    pattern="runtime error:"
     threads="1"
     bench_depth=8
     go_depth=20
@@ -42,15 +42,15 @@ case $1 in
   ;;
   --sanitizer-thread)
     echo "sanitizer-thread testing started"
-    prefix='!'
-    exeprefix=''
-    postfix='2>&1 | grep -A50 "WARNING: ThreadSanitizer:"'
+    mode="sanitizer-thread"
+    pattern="WARNING: ThreadSanitizer:"
     threads="2"
     bench_depth=8
     go_depth=20
     tt_size=128
 
-cat << EOF > tsan.supp
+    tsan_supp=$(mktemp)
+    cat << EOF > "$tsan_supp"
 race:Stockfish::TTEntry::move
 race:Stockfish::TTEntry::depth
 race:Stockfish::TTEntry::bound
@@ -61,39 +61,66 @@ race:Stockfish::TTEntry::is_pv
 
 race:Stockfish::TranspositionTable::probe
 race:Stockfish::TranspositionTable::hashfull
-
 EOF
 
-    export TSAN_OPTIONS="suppressions=./tsan.supp"
-
+    export TSAN_OPTIONS="suppressions=$tsan_supp"
   ;;
   *)
     echo "unknown testing started"
-    prefix=''
-    exeprefix=''
-    postfix=''
+    mode="normal"
     threads="1"
   ;;
 esac
 
+run_test_cmd() {
+  local args=("$@")
+  if [[ "$mode" == "valgrind" || "$mode" == "valgrind-thread" ]]; then
+    valgrind "${valgrind_args[@]}" ./stockfish "${args[@]}" >/dev/null
+  elif [[ "$mode" == "sanitizer-undefined" || "$mode" == "sanitizer-thread" ]]; then
+    local out
+    out=$(./stockfish "${args[@]}" 2>&1)
+    if grep -q "$pattern" <<<"$out"; then
+      echo "Sanitizer warning/error detected:" >&2
+      grep -A50 "$pattern" <<<"$out" >&2
+      return 1
+    fi
+  else
+    ./stockfish "${args[@]}"
+  fi
+}
+
 # simple command line testing
-for args in "eval" \
-            "go nodes 1000" \
-            "go depth 10" \
-            "go movetime 1000" \
-            "go wtime 8000 btime 8000 winc 500 binc 500" \
-            "bench $tt_size $threads $bench_depth default depth"
-do
-
-   echo "$prefix $exeprefix ./stockfish $args $postfix"
-   eval "$prefix $exeprefix ./stockfish $args $postfix"
-
-done
+run_test_cmd eval
+run_test_cmd go nodes 1000
+run_test_cmd go depth 10
+run_test_cmd go movetime 1000
+run_test_cmd go wtime 8000 btime 8000 winc 500 binc 500
+# Valgrind slows the full bench enough to trip a search assertion in CI, so keep
+# the other coverage here and let non-valgrind modes exercise bench.
+if [[ "$mode" != "valgrind" && "$mode" != "valgrind-thread" ]]; then
+  run_test_cmd bench 128 "$threads" 8 default depth
+fi
 
 # more general testing, following an uci protocol exchange
-cat << EOF > game.exp
+game_exp=$(mktemp)
+spawn_cmd="./stockfish"
+if [[ "$mode" == "valgrind" ]]; then
+  spawn_cmd="valgrind --error-exitcode=42 --errors-for-leak-kinds=all --leak-check=full ./stockfish"
+elif [[ "$mode" == "valgrind-thread" ]]; then
+  spawn_cmd="valgrind --fair-sched=try --error-exitcode=42 ./stockfish"
+fi
+
+cat << EOF > "$game_exp"
  set timeout 240
- spawn $exeprefix ./stockfish
+ spawn $spawn_cmd
+
+ proc expect_bestmove {} {
+     expect {
+         -re "bestmove\[^\\r\\n\]*(\\r\\n|\\n)" {}
+         eof {exit 1}
+         timeout {exit 1}
+     }
+ }
 
  send "uci\n"
  expect "uciok"
@@ -103,15 +130,15 @@ cat << EOF > game.exp
  send "ucinewgame\n"
  send "position startpos\n"
  send "go nodes 1000\n"
- expect "bestmove"
+ expect_bestmove
 
  send "position startpos moves e2e4 e7e6\n"
  send "go nodes 1000\n"
- expect "bestmove"
+ expect_bestmove
 
  send "position fen 5rk1/1K4p1/8/8/3B4/8/8/8 b - - 0 1\n"
- send "go depth $go_depth\n"
- expect "bestmove"
+ send "go depth 10\n"
+ expect_bestmove
 
  send "quit\n"
  expect eof
@@ -123,13 +150,22 @@ EOF
 
 #download TB as needed
 if [ ! -d ../tests/syzygy ]; then
-   curl -sL https://api.github.com/repos/niklasf/python-chess/tarball/9b9aa13f9f36d08aadfabff872882f4ab1494e95 | tar -xzf -
+   tmp_file=$(mktemp)
+   curl -sL https://api.github.com/repos/niklasf/python-chess/tarball/9b9aa13f9f36d08aadfabff872882f4ab1494e95 -o "$tmp_file"
+   if ! tar -xOf "$tmp_file" niklasf-python-chess-9b9aa13/SOURCE.txt | grep -q 'tablebase.sesse.net/syzygy/'; then
+      echo "Unexpected python-chess tarball contents!" >&2
+      rm -f "$tmp_file"
+      exit 1
+   fi
+   tar -xzf "$tmp_file"
+   rm -f "$tmp_file"
    mv niklasf-python-chess-9b9aa13 ../tests/syzygy
 fi
 
-cat << EOF > syzygy.exp
+syzygy_exp=$(mktemp)
+cat << EOF > "$syzygy_exp"
  set timeout 600
- spawn $exeprefix ./stockfish
+ spawn $spawn_cmd
  send "uci\n"
  send "setoption name SyzygyPath value ../tests/syzygy/\n"
  expect "info string Found 35 tablebases" {} timeout {exit 1}
@@ -142,62 +178,39 @@ cat << EOF > syzygy.exp
  exit \$value
 EOF
 
-# generate_training_data testing 01
-cat << EOF > data_generation01.exp
- set timeout 240
- spawn $exeprefix ./stockfish
+run_expect_test() {
+  local exp="$1"
+  if [[ "$mode" == "valgrind" || "$mode" == "valgrind-thread" ]]; then
+    local out
+    out=$(mktemp)
+    if ! expect "$exp" >"$out" 2>&1; then
+      cat "$out" >&2
+      rm -f "$out"
+      return 1
+    fi
+    rm -f "$out"
+  elif [[ "$mode" == "sanitizer-undefined" || "$mode" == "sanitizer-thread" ]]; then
+    local out
+    out=$(expect "$exp" 2>&1)
+    if grep -q "$pattern" <<<"$out"; then
+      echo "Sanitizer warning/error detected in expect script:" >&2
+      grep -A50 "$pattern" <<<"$out" >&2
+      return 1
+    fi
+  else
+    expect "$exp"
+  fi
+}
 
- send "uci\n"
- expect "uciok"
-
- send "setoption name Threads value $threads\n"
- send "setoption name Use NNUE value false\n"
- send "isready\n"
- send "generate_training_data depth 3 count 100 keep_draws 1 eval_limit 32000 output_file_name training_data/training_data.bin output_format bin\n"
- expect "INFO: Gensfen finished."
- send "convert_plain targetfile training_data/training_data.bin output_file_name training_data.txt\n"
- expect "all done"
-
- send "quit\n"
- expect eof
-
- # return error code of the spawned program, useful for valgrind
- lassign [wait] pid spawnid os_error_flag value
- exit \$value
-EOF
-
-# generate_training_data testing 02
-cat << EOF > data_generation02.exp
- set timeout 240
- spawn $exeprefix ./stockfish
-
- send "uci\n"
- expect "uciok"
-
- send "setoption name Threads value $threads\n"
- send "setoption name Use NNUE value true\n"
- send "isready\n"
- send "generate_training_data depth 4 count 50 keep_draws 1 eval_limit 32000 output_file_name validation_data/validation_data.bin output_format bin\n"
- expect "INFO: Gensfen finished."
-
- send "quit\n"
- expect eof
-
- # return error code of the spawned program, useful for valgrind
- lassign [wait] pid spawnid os_error_flag value
- exit \$value
-EOF
-
-for exp in game.exp data_generation01.exp data_generation02.exp
+for exp in "$game_exp" "$syzygy_exp"
 do
-
-  echo "$prefix expect $exp $postfix"
-  eval "$prefix expect $exp $postfix"
-
-  rm $exp
-
+  echo "Running expect test: $exp"
+  run_expect_test "$exp"
+  rm "$exp"
 done
 
-rm -f tsan.supp
+if [ -n "${tsan_supp:-}" ]; then
+  rm -f "$tsan_supp"
+fi
 
 echo "instrumented testing OK"

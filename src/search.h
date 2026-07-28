@@ -46,6 +46,7 @@ struct Stack {
   PieceToHistory* continuationHistory;
   int ply;
   Move currentMove;
+  Piece currentMovePiece;
   Move excludedMove;
   Move killers[2];
   Value staticEval;
@@ -76,7 +77,7 @@ struct RootMove {
   Value previousScore = -VALUE_INFINITE;
   int selDepth = 0;
   int tbRank = 0;
-  Value tbScore;
+  Value tbScore = VALUE_ZERO;
   std::vector<Move> pv;
 };
 
@@ -89,7 +90,7 @@ typedef std::vector<RootMove> RootMoves;
 struct LimitsType {
 
   LimitsType() { // Init explicitly due to broken value-initialization of non POD in MSVC
-    time[WHITE] = time[BLACK] = inc[WHITE] = inc[BLACK] = npmsec = movetime = TimePoint(0);
+    time[WHITE] = time[BLACK] = inc[WHITE] = inc[BLACK] = npmsec = movetime = startTime = TimePoint(0);
     movestogo = depth = mate = perft = infinite = 0;
     nodes = 0;
     silent = false;
