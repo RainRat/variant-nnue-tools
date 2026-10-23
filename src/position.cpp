@@ -6323,29 +6323,6 @@ void Position::do_move(Move m, StateInfo& newSt, bool countNode) {
           add_capture_points(st, us, captured);
       }
 
-      if (points_counting())
-      {
-          PointsRule pointsOwner = points_rule_captures();
-          int points = var->piecePoints[type_of(captured)];
-
-          switch (pointsOwner) {
-              case POINTS_US:
-                  st->pointsCount[us] += points;
-                  break;
-              case POINTS_THEM:
-                  st->pointsCount[them] += points;
-                  break;
-              case POINTS_OWNER:
-                  st->pointsCount[color_of(captured)] += points;
-                  break;
-              case POINTS_NON_OWNER:
-                  st->pointsCount[~color_of(captured)] += points;
-                  break;
-              case POINTS_NONE:
-                  break;
-          }
-      }
-
       // Update material hash key and prefetch access to materialTable
       k ^= Zobrist::psq[captured][capsq];
       // (captured piece count was decremented before this line; old count is pieceCount[captured] + 1)
@@ -7488,17 +7465,6 @@ void Position::do_move(Move m, StateInfo& newSt, bool countNode) {
                   Piece pieceToHand = capture_type() == PRISON ? ~transferPiece : transferPiece;
                   dp.handPiece[bycatchDirtyIdx] = pieceToHand;
                   dp.handCount[bycatchDirtyIdx] = pieceCountInHand[color_of(pieceToHand)][type_of(pieceToHand)];
-              }
-          }
-
-          if (points_counting()) {
-              int pts = var->piecePoints[type_of(bpc)];
-              switch (points_rule_captures()) {
-                  case POINTS_US:        st->pointsCount[us]  += pts; break;
-                  case POINTS_THEM:      st->pointsCount[~us] += pts; break;
-                  case POINTS_OWNER:     st->pointsCount[bc]  += pts; break;
-                  case POINTS_NON_OWNER: st->pointsCount[~bc] += pts; break;
-                  default: break;
               }
           }
 

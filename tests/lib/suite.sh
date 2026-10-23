@@ -185,6 +185,7 @@ run_promotion_drops() {
 }
 
 run_state_transitions() {
+    legacy points-capture-scoring.sh 2m "${ENGINE}"
     native occupancy
     native state
     legacy stateinfo-regressions.sh 5m "${ENGINE}"

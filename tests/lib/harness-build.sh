@@ -64,7 +64,8 @@ fsx_harness_init() {
   FSX_HARNESS_ENGINE="${engine}"
   FSX_HARNESS_ENGINE_BASENAME=$(basename "${engine}")
   FSX_HARNESS_CXX="${CXX:-g++}"
-  FSX_HARNESS_CXX_DEFS=(-DIS_64BIT -DUSE_PTHREADS)
+  # Match the default packed-record width in src/Makefile's harness object builds.
+  FSX_HARNESS_CXX_DEFS=(-DIS_64BIT -DUSE_PTHREADS -DDATA_SIZE=512)
   FSX_HARNESS_BUILD_ARGS=()
   FSX_HARNESS_BUILD_EXE=""
   FSX_HARNESS_KNOWN_ENGINE_CONFIG=false
