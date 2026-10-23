@@ -2,7 +2,9 @@
 set -euo pipefail
 
 bin=${1:-./src/stockfish}
-net=${2:-/home/chris/Fairy-Stockfish-X/src/nn-3475407dc199.nnue}
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+FSX_ROOT=${FSX_ROOT:-${ROOT_DIR}/../Fairy-Stockfish-X}
+net=${2:-${FSX_ROOT}/src/nn-3475407dc199.nnue}
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
